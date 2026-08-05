@@ -100,6 +100,9 @@ function toKey(d) {
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
+function isValidPhone(p) {
+  return /^\d{10}$/.test((p || "").trim());
+}
 function minToTime(m) {
   const h = Math.floor(m / 60);
   const mm = m % 60;
@@ -159,6 +162,38 @@ function SmartBookingApp() {
   const [showSettings, setShowSettings] = useState(false);
   const [confirmCancelId, setConfirmCancelId] = useState(null);
   const [saveMsg, setSaveMsg] = useState("");
+
+  // --- client identity (login/registration by phone) ---
+  const [loggedInClient, setLoggedInClient] = useState(null); // {name, phone}
+  const [myUpcoming, setMyUpcoming] = useState([]);
+  const [myUpcomingLoading, setMyUpcomingLoading] = useState(false);
+  const [myCancelId, setMyCancelId] = useState(null);
+
+  // --- owner mode password gate ---
+  const [ownerUnlocked, setOwnerUnlocked] = useState(false);
+  const [showOwnerLogin, setShowOwnerLogin] = useState(false);
+  const [ownerPassInput, setOwnerPassInput] = useState("");
+  const [ownerPassError, setOwnerPassError] = useState("");
+  const OWNER_PASSWORD = "777";
+
+  function requestOwnerMode() {
+    if (ownerUnlocked) {
+      setMode("owner");
+    } else {
+      setOwnerPassInput("");
+      setOwnerPassError("");
+      setShowOwnerLogin(true);
+    }
+  }
+  function submitOwnerPassword() {
+    if (ownerPassInput === OWNER_PASSWORD) {
+      setOwnerUnlocked(true);
+      setShowOwnerLogin(false);
+      setMode("owner");
+    } else {
+      setOwnerPassError("סיסמה שגויה");
+    }
+  }
 
   useEffect(() => {
     const unsub = window.storage.subscribe("settings", (val) => {
@@ -235,7 +270,7 @@ function SmartBookingApp() {
   const afternoonSlots = allowedSlots.filter((t) => t >= 12 * 60);
 
   async function confirmBooking() {
-    if (!clientName.trim() || selectedSlot == null) return;
+    if (!clientName.trim() || selectedSlot == null || !isValidPhone(clientPhone)) return;
     const newAppt = {
       id: genId(),
       start: selectedSlot,
@@ -250,19 +285,104 @@ function SmartBookingApp() {
     try {
       await window.storage.set(`appts:${selectedDate}`, JSON.stringify(updated));
     } catch {}
+    if (newAppt.clientPhone && isValidPhone(newAppt.clientPhone)) {
+      const list = await getClientAppts(newAppt.clientPhone);
+      const updatedList = [...list, { ...newAppt, date: selectedDate }];
+      try {
+        await window.storage.set(`clientAppts:${newAppt.clientPhone}`, JSON.stringify(updatedList));
+      } catch {}
+      if (loggedInClient?.phone === newAppt.clientPhone) {
+        setMyUpcoming(updatedList.filter((a) => isUpcoming(a)));
+      }
+    }
     setSuccessMsg(`נקבע לך תור ל${selectedService.name} בשעה ${minToTime(selectedSlot)}`);
     setSelectedSlot(null);
-    setClientName("");
-    setClientPhone("");
+    if (!loggedInClient) {
+      setClientName("");
+      setClientPhone("");
+    }
   }
 
   async function cancelAppointment(id) {
+    const cancelled = appointments.find((a) => a.id === id);
     const updated = appointments.filter((a) => a.id !== id);
     setAppointments(updated);
     setConfirmCancelId(null);
     try {
       await window.storage.set(`appts:${selectedDate}`, JSON.stringify(updated));
     } catch {}
+    if (cancelled?.clientPhone) {
+      await removeFromClientIndex(cancelled.clientPhone, id);
+    }
+  }
+
+  // --- client identity helpers ---
+  async function getClientAppts(phone) {
+    try {
+      const res = await window.storage.get(`clientAppts:${phone}`);
+      return res?.value ? JSON.parse(res.value) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function removeFromClientIndex(phone, id) {
+    const list = await getClientAppts(phone);
+    const updated = list.filter((a) => a.id !== id);
+    try {
+      await window.storage.set(`clientAppts:${phone}`, JSON.stringify(updated));
+    } catch {}
+    if (loggedInClient?.phone === phone) {
+      setMyUpcoming(updated.filter((a) => isUpcoming(a)));
+    }
+  }
+
+  function isUpcoming(a) {
+    const todayKey = dates[0].key;
+    if (a.date > todayKey) return true;
+    if (a.date === todayKey) {
+      const now = new Date();
+      return a.start >= now.getHours() * 60 + now.getMinutes();
+    }
+    return false;
+  }
+
+  async function refreshMyUpcoming(phone) {
+    setMyUpcomingLoading(true);
+    const list = await getClientAppts(phone);
+    setMyUpcoming(list.filter((a) => isUpcoming(a)).sort((a, b) => (a.date + a.start) - (b.date + b.start) || a.date.localeCompare(b.date)));
+    setMyUpcomingLoading(false);
+  }
+
+  async function loginOrRegisterClient(phone, name) {
+    const profile = { name: name.trim(), phone: phone.trim() };
+    try {
+      await window.storage.set(`client:${phone}`, JSON.stringify(profile));
+    } catch {}
+    setLoggedInClient(profile);
+    setClientName(profile.name);
+    setClientPhone(profile.phone);
+    await refreshMyUpcoming(phone);
+  }
+
+  function logoutClient() {
+    setLoggedInClient(null);
+    setMyUpcoming([]);
+    setClientName("");
+    setClientPhone("");
+  }
+
+  async function myCancelAppointment(appt) {
+    // remove from that day's appts list
+    try {
+      const res = await window.storage.get(`appts:${appt.date}`);
+      const dayList = res?.value ? JSON.parse(res.value) : [];
+      const updatedDay = dayList.filter((a) => a.id !== appt.id);
+      await window.storage.set(`appts:${appt.date}`, JSON.stringify(updatedDay));
+      if (appt.date === selectedDate) setAppointments(updatedDay);
+    } catch {}
+    await removeFromClientIndex(appt.clientPhone, appt.id);
+    setMyCancelId(null);
   }
 
   async function saveSettings(next) {
@@ -316,7 +436,7 @@ function SmartBookingApp() {
           <button onClick={() => setMode("client")}
             style={{ background: mode === "client" ? COLORS.rose : "transparent", color: mode === "client" ? "white" : COLORS.ink }}
             className="px-3 py-1.5 rounded-full transition-colors">לקוחה</button>
-          <button onClick={() => setMode("owner")}
+          <button onClick={requestOwnerMode}
             style={{ background: mode === "owner" ? COLORS.rose : "transparent", color: mode === "owner" ? "white" : COLORS.ink }}
             className="px-3 py-1.5 rounded-full transition-colors">בעלת העסק</button>
         </div>
@@ -381,14 +501,27 @@ function SmartBookingApp() {
         </div>
 
         {mode === "client" ? (
-          <ClientBooking
-            morningSlots={morningSlots} afternoonSlots={afternoonSlots}
-            selectedSlot={selectedSlot} setSelectedSlot={setSelectedSlot}
-            duration={duration} clientName={clientName} setClientName={setClientName}
-            clientPhone={clientPhone} setClientPhone={setClientPhone}
-            confirmBooking={confirmBooking} successMsg={successMsg} setSuccessMsg={setSuccessMsg}
-            maxGap={settings.maxGap}
-          />
+          <div className="space-y-4">
+            <ClientAuth
+              loggedInClient={loggedInClient}
+              loginOrRegisterClient={loginOrRegisterClient}
+              logoutClient={logoutClient}
+              myUpcoming={myUpcoming}
+              myUpcomingLoading={myUpcomingLoading}
+              myCancelId={myCancelId}
+              setMyCancelId={setMyCancelId}
+              myCancelAppointment={myCancelAppointment}
+            />
+            <ClientBooking
+              morningSlots={morningSlots} afternoonSlots={afternoonSlots}
+              selectedSlot={selectedSlot} setSelectedSlot={setSelectedSlot}
+              duration={duration} clientName={clientName} setClientName={setClientName}
+              clientPhone={clientPhone} setClientPhone={setClientPhone}
+              confirmBooking={confirmBooking} successMsg={successMsg} setSuccessMsg={setSuccessMsg}
+              maxGap={settings.maxGap}
+              loggedInClient={loggedInClient}
+            />
+          </div>
         ) : (
           <OwnerView
             appointments={appointments} apptsLoading={apptsLoading}
@@ -401,11 +534,137 @@ function SmartBookingApp() {
           />
         )}
       </div>
+
+      {showOwnerLogin && (
+        <div className="fixed inset-0 flex items-center justify-center z-50" style={{ background: "rgba(43,29,34,0.45)" }}>
+          <div style={{ background: "white", borderColor: COLORS.line }} className="border rounded-2xl p-5 w-[90%] max-w-xs space-y-3">
+            <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">כניסת בעלת העסק</p>
+            <input
+              value={ownerPassInput}
+              onChange={(e) => { setOwnerPassInput(e.target.value); setOwnerPassError(""); }}
+              onKeyDown={(e) => { if (e.key === "Enter") submitOwnerPassword(); }}
+              type="password"
+              inputMode="numeric"
+              autoFocus
+              placeholder="סיסמה"
+              style={{ borderColor: COLORS.line, fontFamily: "'JetBrains Mono', monospace" }}
+              className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 text-center tracking-widest"
+            />
+            {ownerPassError && <p style={{ color: COLORS.rose }} className="text-xs text-center">{ownerPassError}</p>}
+            <div className="flex gap-2">
+              <button onClick={submitOwnerPassword} style={{ background: COLORS.rose }} className="flex-1 text-white text-sm py-2 rounded-lg font-medium">
+                כניסה
+              </button>
+              <button onClick={() => setShowOwnerLogin(false)} style={{ borderColor: COLORS.line, color: COLORS.muted }} className="border px-4 py-2 rounded-lg text-sm">
+                ביטול
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelectedSlot, duration, clientName, setClientName, clientPhone, setClientPhone, confirmBooking, successMsg, setSuccessMsg, maxGap }) {
+function ClientAuth({ loggedInClient, loginOrRegisterClient, logoutClient, myUpcoming, myUpcomingLoading, myCancelId, setMyCancelId, myCancelAppointment }) {
+  const [phone, setPhone] = useState("");
+  const [name, setName] = useState("");
+  const [needsName, setNeedsName] = useState(false);
+  const [error, setError] = useState("");
+  const [checking, setChecking] = useState(false);
+
+  async function handleContinue() {
+    setError("");
+    if (!isValidPhone(phone)) {
+      setError("מספר טלפון חייב להכיל 10 ספרות");
+      return;
+    }
+    if (needsName) {
+      if (!name.trim()) {
+        setError("נא להזין שם מלא");
+        return;
+      }
+      await loginOrRegisterClient(phone, name);
+      return;
+    }
+    setChecking(true);
+    try {
+      const res = await window.storage.get(`client:${phone}`);
+      const profile = JSON.parse(res.value);
+      await loginOrRegisterClient(profile.phone, profile.name);
+    } catch {
+      // no existing profile — ask for name to register
+      setNeedsName(true);
+    }
+    setChecking(false);
+  }
+
+  if (loggedInClient) {
+    return (
+      <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-medium">שלום, {loggedInClient.name} 👋</p>
+          <button onClick={logoutClient} style={{ color: COLORS.muted }} className="text-xs">החלפת משתמשת</button>
+        </div>
+        {myUpcomingLoading ? (
+          <p style={{ color: COLORS.muted }} className="text-xs">בודקת תורים קיימים...</p>
+        ) : myUpcoming.length > 0 ? (
+          <div className="space-y-2">
+            <p style={{ color: COLORS.muted }} className="text-xs font-medium">התורים העתידיים שלך</p>
+            {myUpcoming.map((a) => (
+              <div key={a.id} style={{ borderColor: COLORS.line, background: COLORS.sageSoft }} className="border rounded-xl p-3 flex items-center justify-between">
+                <div>
+                  <p style={{ fontFamily: "'JetBrains Mono', monospace" }} className="text-sm font-medium">
+                    {a.date} · {minToTime(a.start)}–{minToTime(a.end)}
+                  </p>
+                  <p className="text-sm">{a.serviceName}</p>
+                </div>
+                {myCancelId === a.id ? (
+                  <div className="flex items-center gap-1.5">
+                    <button onClick={() => myCancelAppointment(a)} style={{ background: COLORS.rose }} className="text-white text-xs px-2.5 py-1.5 rounded-lg">אישור ביטול</button>
+                    <button onClick={() => setMyCancelId(null)} style={{ borderColor: COLORS.line }} className="border text-xs px-2.5 py-1.5 rounded-lg">חזרה</button>
+                  </div>
+                ) : (
+                  <button onClick={() => setMyCancelId(a.id)} style={{ color: COLORS.rose }} className="text-xs font-medium">ביטול / שינוי</button>
+                )}
+              </div>
+            ))}
+            <p style={{ color: COLORS.muted }} className="text-[11px]">
+              לשינוי תור: בטלי אותו ואז קבעי תור חדש בזמן הרצוי — הפרטים שלך כבר שמורים.
+            </p>
+          </div>
+        ) : (
+          <p style={{ color: COLORS.muted }} className="text-xs">אין לך תורים עתידיים רשומים.</p>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4 space-y-2">
+      <p className="text-sm font-medium">כניסה / הרשמה לפי מספר טלפון</p>
+      <p style={{ color: COLORS.muted }} className="text-xs">
+        אופציונלי — כך לא תצטרכי להזין שוב שם וטלפון, ותוכלי לראות ולנהל תורים קיימים.
+      </p>
+      <div className="flex gap-2">
+        <input value={phone} onChange={(e) => { setPhone(e.target.value.replace(/\D/g, "").slice(0, 10)); setNeedsName(false); setError(""); }}
+          placeholder="מספר נייד (10 ספרות)" type="tel" inputMode="numeric"
+          style={{ borderColor: COLORS.line, fontFamily: "'JetBrains Mono', monospace" }} className="flex-1 border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+      </div>
+      {needsName && (
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="שם מלא (משתמשת חדשה)"
+          style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+      )}
+      {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
+      <button onClick={handleContinue} disabled={checking}
+        style={{ background: COLORS.rose }} className="text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-60">
+        {checking ? "בודקת..." : needsName ? "הרשמה והמשך" : "כניסה"}
+      </button>
+    </div>
+  );
+}
+
+function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelectedSlot, duration, clientName, setClientName, clientPhone, setClientPhone, confirmBooking, successMsg, setSuccessMsg, maxGap, loggedInClient }) {
   if (successMsg) {
     return (
       <div style={{ background: COLORS.sageSoft, borderColor: COLORS.sage }} className="border rounded-2xl p-5 text-center">
@@ -435,13 +694,24 @@ function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelected
           <p className="text-sm font-medium">
             תור נבחר: {minToTime(selectedSlot)}–{minToTime(selectedSlot + duration)}
           </p>
-          <input value={clientName} onChange={(e) => setClientName(e.target.value)} placeholder="שם מלא"
-            style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
-          <input value={clientPhone} onChange={(e) => setClientPhone(e.target.value)} placeholder="טלפון" type="tel"
-            style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+          {loggedInClient ? (
+            <div style={{ background: COLORS.sageSoft }} className="rounded-lg px-3 py-2 text-sm">
+              קובעת עבור: <span className="font-medium">{loggedInClient.name}</span> · {loggedInClient.phone}
+            </div>
+          ) : (
+            <>
+              <input value={clientName} onChange={(e) => setClientName(e.target.value)} placeholder="שם מלא"
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+              <input value={clientPhone} onChange={(e) => setClientPhone(e.target.value.replace(/\D/g, "").slice(0, 10))} placeholder="טלפון (10 ספרות)" type="tel" inputMode="numeric"
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+              {clientPhone && !isValidPhone(clientPhone) && (
+                <p style={{ color: COLORS.rose }} className="text-xs">מספר טלפון חייב להכיל 10 ספרות</p>
+              )}
+            </>
+          )}
           <div className="flex gap-2">
-            <button onClick={confirmBooking} disabled={!clientName.trim()}
-              style={{ background: clientName.trim() ? COLORS.rose : COLORS.muted }}
+            <button onClick={confirmBooking} disabled={!clientName.trim() || !isValidPhone(clientPhone)}
+              style={{ background: clientName.trim() && isValidPhone(clientPhone) ? COLORS.rose : COLORS.muted }}
               className="flex-1 text-white text-sm py-2 rounded-lg font-medium disabled:opacity-60">
               אישור קביעת תור
             </button>
