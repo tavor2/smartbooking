@@ -69,6 +69,7 @@ const COLORS = {
   sageSoft: "#E3E8D9",
   muted: "#9C8790",
   line: "#E8DBD9",
+  past: "#D9CFCB",
 };
 
 const DEFAULT_SETTINGS = {
@@ -91,7 +92,13 @@ function genId() {
   return Math.random().toString(36).slice(2, 10);
 }
 function toKey(d) {
-  return d.toISOString().slice(0, 10);
+  // Local date, not UTC — avoids the date shifting by a day near midnight
+  // depending on timezone (which is what caused today's booking to save
+  // under the wrong day).
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 function minToTime(m) {
   const h = Math.floor(m / 60);
@@ -186,6 +193,17 @@ function SmartBookingApp() {
     settings.services.find((s) => s.id === selectedServiceId) || settings.services[0];
   const duration = selectedService?.duration || 30;
 
+  const isToday = selectedDate === dates[0].key;
+  const nowMin = useMemo(() => {
+    const now = new Date();
+    return now.getHours() * 60 + now.getMinutes();
+  }, [selectedDate]);
+  // round up to the next slot boundary so a slot that's already in progress
+  // isn't offered
+  const effectiveStartMin = isToday
+    ? Math.max(startMin, Math.ceil(nowMin / STEP) * STEP)
+    : startMin;
+
   const existingBlocks = useMemo(
     () => appointments.map((a) => ({ start: a.start, end: a.end })),
     [appointments]
@@ -194,9 +212,9 @@ function SmartBookingApp() {
   const allowedSlots = useMemo(
     () =>
       selectedService
-        ? getAllowedSlots(existingBlocks, duration, startMin, endMin, settings.maxGap)
+        ? getAllowedSlots(existingBlocks, duration, effectiveStartMin, endMin, settings.maxGap)
         : [],
-    [existingBlocks, duration, startMin, endMin, settings.maxGap, selectedService]
+    [existingBlocks, duration, effectiveStartMin, endMin, settings.maxGap, selectedService]
   );
   const allowedSet = useMemo(() => new Set(allowedSlots), [allowedSlots]);
 
@@ -206,11 +224,12 @@ function SmartBookingApp() {
       const booked = existingBlocks.some((a) => t < a.end && t + STEP > a.start);
       let status = "blocked";
       if (booked) status = "booked";
+      else if (isToday && t < nowMin) status = "past";
       else if (allowedSet.has(t)) status = "available";
       cells.push({ t, status });
     }
     return cells;
-  }, [startMin, endMin, existingBlocks, allowedSet]);
+  }, [startMin, endMin, existingBlocks, allowedSet, isToday, nowMin]);
 
   const morningSlots = allowedSlots.filter((t) => t < 12 * 60);
   const afternoonSlots = allowedSlots.filter((t) => t >= 12 * 60);
@@ -342,6 +361,7 @@ function SmartBookingApp() {
               <span className="flex items-center gap-1"><span style={{ background: COLORS.rose }} className="w-2 h-2 rounded-full inline-block" />תפוס</span>
               <span className="flex items-center gap-1"><span style={{ background: COLORS.sage }} className="w-2 h-2 rounded-full inline-block" />פנוי</span>
               <span className="flex items-center gap-1"><span style={{ background: COLORS.muted }} className="w-2 h-2 rounded-full inline-block opacity-50" />חסום (מרווח)</span>
+              <span className="flex items-center gap-1"><span style={{ background: COLORS.past }} className="w-2 h-2 rounded-full inline-block" />עבר</span>
             </div>
           </div>
           {apptsLoading ? (
@@ -349,8 +369,8 @@ function SmartBookingApp() {
           ) : (
             <div className="flex gap-[2px]">
               {timelineCells.map((c) => (
-                <div key={c.t} title={`${minToTime(c.t)} · ${c.status === "booked" ? "תפוס" : c.status === "available" ? "פנוי" : "חסום"}`}
-                  style={{ background: c.status === "booked" ? COLORS.rose : c.status === "available" ? COLORS.sage : COLORS.line, opacity: c.status === "blocked" ? 0.6 : 1 }}
+                <div key={c.t} title={`${minToTime(c.t)} · ${c.status === "booked" ? "תפוס" : c.status === "available" ? "פנוי" : c.status === "past" ? "עבר" : "חסום"}`}
+                  style={{ background: c.status === "booked" ? COLORS.rose : c.status === "available" ? COLORS.sage : c.status === "past" ? COLORS.past : COLORS.line, opacity: c.status === "blocked" ? 0.6 : 1 }}
                   className="h-6 flex-1 rounded-[2px]" />
               ))}
             </div>
