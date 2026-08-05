@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>לוח תורים חכם</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Frank+Ruhl+Libre:wght@500;700&family=Heebo:wght@300;400;500;600;700&family=JetBrains+Mono:wght@500&display=swap');
+body { font-family: 'Heebo', sans-serif; margin: 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useMemo, useCallback } = React;
+
+const COLORS = {
+  bg: "#FBF6F4",
+  ink: "#2B1D22",
+  rose: "#A83E5C",
+  roseSoft: "#F0C9D2",
+  sage: "#7C8B66",
+  sageSoft: "#E3E8D9",
+  muted: "#9C8790",
+  line: "#E8DBD9",
+};
+
+const DEFAULT_SETTINGS = {
+  businessStart: 9,
+  businessEnd: 17,
+  maxGap: 120,
+  services: [
+    { id: "s1", name: "עיצוב גבות", duration: 20, price: 60 },
+    { id: "s2", name: "פדיקור", duration: 45, price: 130 },
+    { id: "s3", name: "מניקור", duration: 45, price: 110 },
+    { id: "s4", name: "לק ג'ל", duration: 50, price: 140 },
+    { id: "s5", name: "טיפול פנים", duration: 60, price: 220 },
+    { id: "s6", name: "הסרת שיער בשעווה", duration: 30, price: 90 },
+  ],
+};
+
+const STEP = 15;
+
+// localStorage-backed storage (per-browser, no server involved)
+const storage = {
+  get: async (key) => {
+    const v = localStorage.getItem("sb:" + key);
+    if (v === null) throw new Error("not found");
+    return { value: v };
+  },
+  set: async (key, value) => {
+    localStorage.setItem("sb:" + key, value);
+    return { value };
+  },
+};
+
+function genId() {
+  return Math.random().toString(36).slice(2, 10);
+}
+function toKey(d) {
+  return d.toISOString().slice(0, 10);
+}
+function minToTime(m) {
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return `${String(h).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+function getAllowedSlots(existing, duration, startMin, endMin, maxGap) {
+  const res = [];
+  for (let t = startMin; t + duration <= endMin; t += STEP) {
+    const overlap = existing.some((a) => t < a.end && t + duration > a.start);
+    if (overlap) continue;
+    const combined = [...existing, { start: t, end: t + duration }].sort(
+      (a, b) => a.start - b.start
+    );
+    let ok = true;
+    for (let i = 1; i < combined.length; i++) {
+      if (combined[i].start - combined[i - 1].end > maxGap) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) res.push(t);
+  }
+  return res;
+}
+
+function generateDates(n) {
+  const out = [];
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  for (let i = 0; i < n; i++) {
+    const d = new Date(today);
+    d.setDate(d.getDate() + i);
+    out.push({
+      key: toKey(d),
+      weekday: d.toLocaleDateString("he-IL", { weekday: "short" }),
+      day: d.getDate(),
+      month: d.toLocaleDateString("he-IL", { month: "short" }),
+      isToday: i === 0,
+    });
+  }
+  return out;
+}
+
+function SmartBookingApp() {
+  const dates = useMemo(() => generateDates(14), []);
+  const [loading, setLoading] = useState(true);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [mode, setMode] = useState("client");
+  const [selectedDate, setSelectedDate] = useState(dates[0].key);
+  const [appointments, setAppointments] = useState([]);
+  const [apptsLoading, setApptsLoading] = useState(true);
+  const [selectedServiceId, setSelectedServiceId] = useState(null);
+  const [selectedSlot, setSelectedSlot] = useState(null);
+  const [clientName, setClientName] = useState("");
+  const [clientPhone, setClientPhone] = useState("");
+  const [successMsg, setSuccessMsg] = useState("");
+  const [showSettings, setShowSettings] = useState(false);
+  const [confirmCancelId, setConfirmCancelId] = useState(null);
+  const [saveMsg, setSaveMsg] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await storage.get("settings");
+        const parsed = JSON.parse(r.value);
+        setSettings(parsed);
+        if (parsed.services?.length) setSelectedServiceId(parsed.services[0].id);
+      } catch {
+        setSettings(DEFAULT_SETTINGS);
+        setSelectedServiceId(DEFAULT_SETTINGS.services[0].id);
+        try {
+          await storage.set("settings", JSON.stringify(DEFAULT_SETTINGS));
+        } catch {}
+      }
+      setLoading(false);
+    })();
+  }, []);
+
+  const loadAppointments = useCallback(async (dateKey) => {
+    setApptsLoading(true);
+    try {
+      const r = await storage.get(`appts:${dateKey}`);
+      setAppointments(JSON.parse(r.value));
+    } catch {
+      setAppointments([]);
+    }
+    setApptsLoading(false);
+  }, []);
+
+  useEffect(() => {
+    loadAppointments(selectedDate);
+    setSelectedSlot(null);
+    setSuccessMsg("");
+  }, [selectedDate, loadAppointments]);
+
+  const startMin = settings.businessStart * 60;
+  const endMin = settings.businessEnd * 60;
+  const selectedService =
+    settings.services.find((s) => s.id === selectedServiceId) || settings.services[0];
+  const duration = selectedService?.duration || 30;
+
+  const existingBlocks = useMemo(
+    () => appointments.map((a) => ({ start: a.start, end: a.end })),
+    [appointments]
+  );
+
+  const allowedSlots = useMemo(
+    () =>
+      selectedService
+        ? getAllowedSlots(existingBlocks, duration, startMin, endMin, settings.maxGap)
+        : [],
+    [existingBlocks, duration, startMin, endMin, settings.maxGap, selectedService]
+  );
+  const allowedSet = useMemo(() => new Set(allowedSlots), [allowedSlots]);
+
+  const timelineCells = useMemo(() => {
+    const cells = [];
+    for (let t = startMin; t < endMin; t += STEP) {
+      const booked = existingBlocks.some((a) => t < a.end && t + STEP > a.start);
+      let status = "blocked";
+      if (booked) status = "booked";
+      else if (allowedSet.has(t)) status = "available";
+      cells.push({ t, status });
+    }
+    return cells;
+  }, [startMin, endMin, existingBlocks, allowedSet]);
+
+  const morningSlots = allowedSlots.filter((t) => t < 12 * 60);
+  const afternoonSlots = allowedSlots.filter((t) => t >= 12 * 60);
+
+  async function confirmBooking() {
+    if (!clientName.trim() || selectedSlot == null) return;
+    const newAppt = {
+      id: genId(),
+      start: selectedSlot,
+      end: selectedSlot + duration,
+      serviceId: selectedService.id,
+      serviceName: selectedService.name,
+      clientName: clientName.trim(),
+      clientPhone: clientPhone.trim(),
+    };
+    const updated = [...appointments, newAppt];
+    setAppointments(updated);
+    try {
+      await storage.set(`appts:${selectedDate}`, JSON.stringify(updated));
+    } catch {}
+    setSuccessMsg(`נקבע לך תור ל${selectedService.name} בשעה ${minToTime(selectedSlot)}`);
+    setSelectedSlot(null);
+    setClientName("");
+    setClientPhone("");
+  }
+
+  async function cancelAppointment(id) {
+    const updated = appointments.filter((a) => a.id !== id);
+    setAppointments(updated);
+    setConfirmCancelId(null);
+    try {
+      await storage.set(`appts:${selectedDate}`, JSON.stringify(updated));
+    } catch {}
+  }
+
+  async function saveSettings(next) {
+    setSettings(next);
+    try {
+      await storage.set("settings", JSON.stringify(next));
+      setSaveMsg("ההגדרות נשמרו");
+      setTimeout(() => setSaveMsg(""), 1800);
+    } catch {}
+  }
+
+  function updateService(id, field, value) {
+    const services = settings.services.map((s) =>
+      s.id === id ? { ...s, [field]: field === "name" ? value : Number(value) } : s
+    );
+    saveSettings({ ...settings, services });
+  }
+  function removeService(id) {
+    saveSettings({ ...settings, services: settings.services.filter((s) => s.id !== id) });
+  }
+  function addService() {
+    const services = [...settings.services, { id: genId(), name: "שירות חדש", duration: 30, price: 0 }];
+    saveSettings({ ...settings, services });
+  }
+
+  if (loading) {
+    return (
+      <div style={{ background: COLORS.bg, minHeight: "100vh" }} className="flex items-center justify-center text-[15px]">
+        <span style={{ color: COLORS.muted }}>טוען...</span>
+      </div>
+    );
+  }
+
+  const selectedDateInfo = dates.find((d) => d.key === selectedDate);
+
+  return (
+    <div style={{ background: COLORS.bg, color: COLORS.ink, minHeight: "100vh" }} className="w-full">
+      <div style={{ borderColor: COLORS.line }} className="border-b px-5 py-4 flex items-center justify-between max-w-2xl mx-auto">
+        <div className="flex items-center gap-2">
+          <span style={{ color: COLORS.rose }} className="text-lg leading-none">✦</span>
+          <div>
+            <h1 style={{ fontFamily: "'Frank Ruhl Libre', serif", color: COLORS.ink }} className="text-xl font-bold leading-none">
+              לוח תורים חכם
+            </h1>
+            <p style={{ color: COLORS.muted }} className="text-xs mt-1">
+              בלי חורים סתמיים ביום — תורים נשמרים צמודים אחד לשני
+            </p>
+          </div>
+        </div>
+        <div style={{ background: COLORS.roseSoft }} className="flex rounded-full p-1 text-xs font-medium">
+          <button onClick={() => setMode("client")}
+            style={{ background: mode === "client" ? COLORS.rose : "transparent", color: mode === "client" ? "white" : COLORS.ink }}
+            className="px-3 py-1.5 rounded-full transition-colors">לקוחה</button>
+          <button onClick={() => setMode("owner")}
+            style={{ background: mode === "owner" ? COLORS.rose : "transparent", color: mode === "owner" ? "white" : COLORS.ink }}
+            className="px-3 py-1.5 rounded-full transition-colors">בעלת העסק</button>
+        </div>
+      </div>
+
+      <div className="px-5 py-4 space-y-5 max-w-2xl mx-auto">
+        {mode === "client" && (
+          <div>
+            <p style={{ color: COLORS.muted }} className="text-xs mb-2 font-medium">בחרי טיפול</p>
+            <div className="flex flex-wrap gap-2">
+              {settings.services.map((s) => (
+                <button key={s.id} onClick={() => { setSelectedServiceId(s.id); setSelectedSlot(null); }}
+                  style={{ background: selectedServiceId === s.id ? COLORS.rose : "white", color: selectedServiceId === s.id ? "white" : COLORS.ink, borderColor: COLORS.line }}
+                  className="border px-3 py-1.5 rounded-full text-sm transition-colors">
+                  {s.name} · {s.duration} ד׳
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div>
+          <p style={{ color: COLORS.muted }} className="text-xs mb-2 font-medium">בחרי תאריך</p>
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {dates.map((d) => (
+              <button key={d.key} onClick={() => setSelectedDate(d.key)}
+                style={{ background: selectedDate === d.key ? COLORS.ink : "white", color: selectedDate === d.key ? "white" : COLORS.ink, borderColor: COLORS.line }}
+                className="border rounded-xl px-3 py-2 text-center min-w-[52px] shrink-0">
+                <div className="text-[10px] opacity-70">{d.weekday}</div>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace" }} className="text-sm font-medium">{d.day}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <p style={{ color: COLORS.muted }} className="text-xs font-medium">
+              {selectedDateInfo?.weekday}, {selectedDateInfo?.day} {selectedDateInfo?.month} · {settings.businessStart}:00–{settings.businessEnd}:00
+            </p>
+            <div className="flex items-center gap-3 text-[10px]" style={{ color: COLORS.muted }}>
+              <span className="flex items-center gap-1"><span style={{ background: COLORS.rose }} className="w-2 h-2 rounded-full inline-block" />תפוס</span>
+              <span className="flex items-center gap-1"><span style={{ background: COLORS.sage }} className="w-2 h-2 rounded-full inline-block" />פנוי</span>
+              <span className="flex items-center gap-1"><span style={{ background: COLORS.muted }} className="w-2 h-2 rounded-full inline-block opacity-50" />חסום (מרווח)</span>
+            </div>
+          </div>
+          {apptsLoading ? (
+            <div style={{ color: COLORS.muted }} className="text-xs">טוען לוח...</div>
+          ) : (
+            <div className="flex gap-[2px]">
+              {timelineCells.map((c) => (
+                <div key={c.t} title={`${minToTime(c.t)} · ${c.status === "booked" ? "תפוס" : c.status === "available" ? "פנוי" : "חסום"}`}
+                  style={{ background: c.status === "booked" ? COLORS.rose : c.status === "available" ? COLORS.sage : COLORS.line, opacity: c.status === "blocked" ? 0.6 : 1 }}
+                  className="h-6 flex-1 rounded-[2px]" />
+              ))}
+            </div>
+          )}
+          <div className="flex justify-between mt-1 text-[10px]" style={{ color: COLORS.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+            <span>{settings.businessStart}:00</span>
+            <span>{settings.businessEnd}:00</span>
+          </div>
+        </div>
+
+        {mode === "client" ? (
+          <ClientBooking
+            morningSlots={morningSlots} afternoonSlots={afternoonSlots}
+            selectedSlot={selectedSlot} setSelectedSlot={setSelectedSlot}
+            duration={duration} clientName={clientName} setClientName={setClientName}
+            clientPhone={clientPhone} setClientPhone={setClientPhone}
+            confirmBooking={confirmBooking} successMsg={successMsg} setSuccessMsg={setSuccessMsg}
+            maxGap={settings.maxGap}
+          />
+        ) : (
+          <OwnerView
+            appointments={appointments} apptsLoading={apptsLoading}
+            confirmCancelId={confirmCancelId} setConfirmCancelId={setConfirmCancelId}
+            cancelAppointment={cancelAppointment}
+            showSettings={showSettings} setShowSettings={setShowSettings}
+            settings={settings} saveSettings={saveSettings}
+            updateService={updateService} removeService={removeService} addService={addService}
+            saveMsg={saveMsg}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelectedSlot, duration, clientName, setClientName, clientPhone, setClientPhone, confirmBooking, successMsg, setSuccessMsg, maxGap }) {
+  if (successMsg) {
+    return (
+      <div style={{ background: COLORS.sageSoft, borderColor: COLORS.sage }} className="border rounded-2xl p-5 text-center">
+        <div style={{ color: COLORS.sage }} className="text-xl mb-1">✓</div>
+        <p className="font-medium">{successMsg}</p>
+        <button onClick={() => setSuccessMsg("")} style={{ background: COLORS.sage }} className="mt-3 text-white text-sm px-4 py-1.5 rounded-full">
+          קביעת תור נוסף
+        </button>
+      </div>
+    );
+  }
+  const noSlots = morningSlots.length === 0 && afternoonSlots.length === 0;
+  return (
+    <div className="space-y-4">
+      {noSlots ? (
+        <div style={{ color: COLORS.muted, borderColor: COLORS.line }} className="border rounded-xl p-4 text-sm text-center">
+          אין תורים פנויים בתאריך הזה שעומדים בכלל ה-{maxGap} דקות. נסי לבחור תאריך אחר.
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {morningSlots.length > 0 && <SlotGroup label="בוקר" slots={morningSlots} selectedSlot={selectedSlot} onSelect={setSelectedSlot} />}
+          {afternoonSlots.length > 0 && <SlotGroup label="צהריים / אחה״צ" slots={afternoonSlots} selectedSlot={selectedSlot} onSelect={setSelectedSlot} />}
+        </div>
+      )}
+      {selectedSlot != null && (
+        <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4 space-y-3">
+          <p className="text-sm font-medium">
+            תור נבחר: {minToTime(selectedSlot)}–{minToTime(selectedSlot + duration)}
+          </p>
+          <input value={clientName} onChange={(e) => setClientName(e.target.value)} placeholder="שם מלא"
+            style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+          <input value={clientPhone} onChange={(e) => setClientPhone(e.target.value)} placeholder="טלפון" type="tel"
+            style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+          <div className="flex gap-2">
+            <button onClick={confirmBooking} disabled={!clientName.trim()}
+              style={{ background: clientName.trim() ? COLORS.rose : COLORS.muted }}
+              className="flex-1 text-white text-sm py-2 rounded-lg font-medium disabled:opacity-60">
+              אישור קביעת תור
+            </button>
+            <button onClick={() => setSelectedSlot(null)} style={{ borderColor: COLORS.line, color: COLORS.muted }} className="border px-4 py-2 rounded-lg text-sm">
+              ביטול
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SlotGroup({ label, slots, selectedSlot, onSelect }) {
+  return (
+    <div>
+      <p style={{ color: COLORS.muted }} className="text-xs mb-1.5">{label}</p>
+      <div className="flex flex-wrap gap-2">
+        {slots.map((t) => (
+          <button key={t} onClick={() => onSelect(t)}
+            style={{ background: selectedSlot === t ? COLORS.rose : COLORS.sageSoft, color: selectedSlot === t ? "white" : COLORS.ink, fontFamily: "'JetBrains Mono', monospace" }}
+            className="px-3 py-1.5 rounded-lg text-sm">
+            {minToTime(t)}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function OwnerView({ appointments, apptsLoading, confirmCancelId, setConfirmCancelId, cancelAppointment, showSettings, setShowSettings, settings, saveSettings, updateService, removeService, addService, saveMsg }) {
+  const sorted = [...appointments].sort((a, b) => a.start - b.start);
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <p style={{ color: COLORS.muted }} className="text-xs font-medium">{sorted.length} תורים ביום זה</p>
+        <button onClick={() => setShowSettings((v) => !v)} style={{ color: COLORS.rose }} className="text-xs font-medium">
+          ⚙ הגדרות
+        </button>
+      </div>
+
+      {!apptsLoading && sorted.length === 0 && (
+        <div style={{ color: COLORS.muted, borderColor: COLORS.line }} className="border rounded-xl p-4 text-sm text-center">
+          אין עדיין תורים ליום הזה.
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {sorted.map((a) => (
+          <div key={a.id} style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-xl p-3 flex items-center justify-between">
+            <div>
+              <p style={{ fontFamily: "'JetBrains Mono', monospace" }} className="text-sm font-medium">{minToTime(a.start)}–{minToTime(a.end)}</p>
+              <p className="text-sm">{a.serviceName}</p>
+              <p style={{ color: COLORS.muted }} className="text-xs">{a.clientName} {a.clientPhone && `· ${a.clientPhone}`}</p>
+            </div>
+            {confirmCancelId === a.id ? (
+              <div className="flex items-center gap-1.5">
+                <button onClick={() => cancelAppointment(a.id)} style={{ background: COLORS.rose }} className="text-white text-xs px-2.5 py-1.5 rounded-lg">לבטל תור</button>
+                <button onClick={() => setConfirmCancelId(null)} style={{ borderColor: COLORS.line }} className="border text-xs px-2.5 py-1.5 rounded-lg">חזרה</button>
+              </div>
+            ) : (
+              <button onClick={() => setConfirmCancelId(a.id)} style={{ color: COLORS.muted }}>✕</button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {showSettings && (
+        <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4 space-y-4">
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-xs block mb-1">שעת פתיחה</label>
+              <select value={settings.businessStart} onChange={(e) => saveSettings({ ...settings, businessStart: Number(e.target.value) })}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm">
+                {Array.from({ length: 15 }, (_, i) => i + 6).map((h) => <option key={h} value={h}>{h}:00</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-xs block mb-1">שעת סגירה</label>
+              <select value={settings.businessEnd} onChange={(e) => saveSettings({ ...settings, businessEnd: Number(e.target.value) })}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm">
+                {Array.from({ length: 15 }, (_, i) => i + 6).map((h) => <option key={h} value={h}>{h}:00</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-xs block mb-1">מרווח מקס׳ (ד׳)</label>
+              <input type="number" min={15} step={15} value={settings.maxGap}
+                onChange={(e) => saveSettings({ ...settings, maxGap: Number(e.target.value) })}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            </div>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <p style={{ color: COLORS.muted }} className="text-xs font-medium">טיפולים</p>
+              <button onClick={addService} style={{ color: COLORS.rose }} className="text-xs">+ הוספה</button>
+            </div>
+            <div className="space-y-2">
+              {settings.services.map((s) => (
+                <div key={s.id} className="flex items-center gap-2">
+                  <input value={s.name} onChange={(e) => updateService(s.id, "name", e.target.value)}
+                    style={{ borderColor: COLORS.line }} className="flex-1 border rounded-lg px-2 py-1.5 text-sm min-w-0" />
+                  <input type="number" value={s.duration} onChange={(e) => updateService(s.id, "duration", e.target.value)}
+                    style={{ borderColor: COLORS.line }} className="w-16 border rounded-lg px-2 py-1.5 text-sm" title="דקות" />
+                  <input type="number" value={s.price} onChange={(e) => updateService(s.id, "price", e.target.value)}
+                    style={{ borderColor: COLORS.line }} className="w-16 border rounded-lg px-2 py-1.5 text-sm" title="מחיר" />
+                  <button onClick={() => removeService(s.id)} style={{ color: COLORS.muted }}>🗑</button>
+                </div>
+              ))}
+            </div>
+          </div>
+          {saveMsg && <p style={{ color: COLORS.sage }} className="text-xs">{saveMsg}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<SmartBookingApp />);
+</script>
+</body>
+</html>
