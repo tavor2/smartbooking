@@ -8,7 +8,7 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<meta name="apple-mobile-web-app-title" content="לוח תורים חכם" />
+<meta name="apple-mobile-web-app-title" content="קביעת תור" />
 <meta name="description" content="לוח תורים חכם ללא חורים סתמיים ביום" />
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
@@ -102,15 +102,21 @@ const DEFAULT_SETTINGS = {
 
 const STEP = 15;
 const LEAD_TIME_HOURS = 2;
+const APP_VERSION = "1.5.0";
 
 // --- PWA setup: builds icons + a manifest at runtime (no extra files needed) ---
-function generateIconDataUrl(size, letter) {
+function generateIconDataUrl(size) {
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext("2d");
-  const r = size * 0.22;
-  ctx.fillStyle = "#A83E5C";
+  const r = size * 0.26;
+
+  // soft rounded-square background with a gentle gradient
+  const grad = ctx.createLinearGradient(0, 0, size, size);
+  grad.addColorStop(0, "#C96286");
+  grad.addColorStop(1, "#A83E5C");
+  ctx.fillStyle = grad;
   ctx.beginPath();
   ctx.moveTo(r, 0);
   ctx.arcTo(size, 0, size, size, r);
@@ -119,20 +125,25 @@ function generateIconDataUrl(size, letter) {
   ctx.arcTo(0, 0, size, 0, r);
   ctx.closePath();
   ctx.fill();
-  ctx.fillStyle = "#FFFFFF";
-  ctx.font = `bold ${Math.round(size * 0.52)}px 'Frank Ruhl Libre', 'Heebo', sans-serif`;
+
+  // soft white glow circle behind the emoji for a friendlier feel
+  ctx.beginPath();
+  ctx.arc(size / 2, size / 2, size * 0.34, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(255,255,255,0.16)";
+  ctx.fill();
+
+  ctx.font = `${Math.round(size * 0.54)}px 'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',sans-serif`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText(letter, size / 2, size / 2 + size * 0.04);
+  ctx.fillText("💅", size / 2, size / 2 + size * 0.05);
   return canvas.toDataURL("image/png");
 }
 
 let pwaInitialized = false;
 function setupPWA(businessName) {
   const name = (businessName || "לוח תורים חכם").trim();
-  const letter = name[0] || "✦";
-  const icon192 = generateIconDataUrl(192, letter);
-  const icon512 = generateIconDataUrl(512, letter);
+  const icon192 = generateIconDataUrl(192);
+  const icon512 = generateIconDataUrl(512);
 
   const manifest = {
     name,
@@ -176,6 +187,14 @@ function setupPWA(businessName) {
     document.head.appendChild(favicon);
   }
   favicon.href = icon192;
+
+  let appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+  if (!appleTitle) {
+    appleTitle = document.createElement("meta");
+    appleTitle.name = "apple-mobile-web-app-title";
+    document.head.appendChild(appleTitle);
+  }
+  appleTitle.content = name.slice(0, 12);
 
   if (!pwaInitialized && "serviceWorker" in navigator) {
     pwaInitialized = true;
@@ -744,6 +763,10 @@ function SmartBookingApp() {
             saveMsg={saveMsg}
           />
         )}
+      </div>
+
+      <div className="text-center pb-4">
+        <p style={{ color: COLORS.muted }} className="text-[10px]">גרסה {APP_VERSION}</p>
       </div>
 
       {showOwnerLogin && (
