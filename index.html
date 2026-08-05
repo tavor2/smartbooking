@@ -4,6 +4,12 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>לוח תורים חכם</title>
+<meta name="theme-color" content="#A83E5C" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="לוח תורים חכם" />
+<meta name="description" content="לוח תורים חכם ללא חורים סתמיים ביום" />
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
@@ -70,12 +76,20 @@ const COLORS = {
   muted: "#9C8790",
   line: "#E8DBD9",
   past: "#D9CFCB",
+  closed: "#6B5568",
+  closedSoft: "#E7DEE7",
 };
 
 const DEFAULT_SETTINGS = {
   businessStart: 9,
   businessEnd: 17,
   maxGap: 120,
+  closures: [],
+  leadTimeStartHour: 9,
+  cancelLimitHours: 48,
+  ownerPhone: "",
+  businessName: "לוח תורים חכם",
+  tagline: "בלי חורים סתמיים ביום — תורים נשמרים צמודים אחד לשני",
   services: [
     { id: "s1", name: "עיצוב גבות", duration: 20, price: 60 },
     { id: "s2", name: "פדיקור", duration: 45, price: 130 },
@@ -87,6 +101,99 @@ const DEFAULT_SETTINGS = {
 };
 
 const STEP = 15;
+const LEAD_TIME_HOURS = 2;
+
+// --- PWA setup: builds icons + a manifest at runtime (no extra files needed) ---
+function generateIconDataUrl(size, letter) {
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  const r = size * 0.22;
+  ctx.fillStyle = "#A83E5C";
+  ctx.beginPath();
+  ctx.moveTo(r, 0);
+  ctx.arcTo(size, 0, size, size, r);
+  ctx.arcTo(size, size, 0, size, r);
+  ctx.arcTo(0, size, 0, 0, r);
+  ctx.arcTo(0, 0, size, 0, r);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "#FFFFFF";
+  ctx.font = `bold ${Math.round(size * 0.52)}px 'Frank Ruhl Libre', 'Heebo', sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(letter, size / 2, size / 2 + size * 0.04);
+  return canvas.toDataURL("image/png");
+}
+
+let pwaInitialized = false;
+function setupPWA(businessName) {
+  const name = (businessName || "לוח תורים חכם").trim();
+  const letter = name[0] || "✦";
+  const icon192 = generateIconDataUrl(192, letter);
+  const icon512 = generateIconDataUrl(512, letter);
+
+  const manifest = {
+    name,
+    short_name: name.slice(0, 12),
+    description: "לוח תורים חכם ללא חורים סתמיים ביום",
+    start_url: window.location.href.split("#")[0],
+    scope: new URL(".", window.location.href).href,
+    display: "standalone",
+    background_color: "#FBF6F4",
+    theme_color: "#A83E5C",
+    dir: "rtl",
+    lang: "he",
+    icons: [
+      { src: icon192, sizes: "192x192", type: "image/png", purpose: "any maskable" },
+      { src: icon512, sizes: "512x512", type: "image/png", purpose: "any maskable" },
+    ],
+  };
+  const manifestBlob = new Blob([JSON.stringify(manifest)], { type: "application/manifest+json" });
+  const manifestUrl = URL.createObjectURL(manifestBlob);
+
+  let manifestLink = document.querySelector('link[rel="manifest"]');
+  if (!manifestLink) {
+    manifestLink = document.createElement("link");
+    manifestLink.rel = "manifest";
+    document.head.appendChild(manifestLink);
+  }
+  manifestLink.href = manifestUrl;
+
+  let appleIcon = document.querySelector('link[rel="apple-touch-icon"]');
+  if (!appleIcon) {
+    appleIcon = document.createElement("link");
+    appleIcon.rel = "apple-touch-icon";
+    document.head.appendChild(appleIcon);
+  }
+  appleIcon.href = icon192;
+
+  let favicon = document.querySelector('link[rel="icon"]');
+  if (!favicon) {
+    favicon = document.createElement("link");
+    favicon.rel = "icon";
+    document.head.appendChild(favicon);
+  }
+  favicon.href = icon192;
+
+  if (!pwaInitialized && "serviceWorker" in navigator) {
+    pwaInitialized = true;
+    const swCode = `
+      self.addEventListener('install', () => self.skipWaiting());
+      self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+      self.addEventListener('fetch', (e) => {
+        e.respondWith(
+          fetch(e.request).catch(() => caches.match(e.request))
+        );
+      });
+    `;
+    const swBlob = new Blob([swCode], { type: "text/javascript" });
+    const swUrl = URL.createObjectURL(swBlob);
+    const pageScope = new URL(".", window.location.href).pathname;
+    navigator.serviceWorker.register(swUrl, { scope: pageScope }).catch(() => {});
+  }
+}
 
 function genId() {
   return Math.random().toString(36).slice(2, 10);
@@ -99,6 +206,17 @@ function toKey(d) {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
+}
+function timeToMin(str) {
+  if (!str) return 0;
+  const [h, m] = str.split(":").map(Number);
+  return h * 60 + (m || 0);
+}
+function hoursUntilAppt(dateStr, startMinutes) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const apptDate = new Date(y, m - 1, d, 0, 0, 0, 0);
+  apptDate.setMinutes(apptDate.getMinutes() + startMinutes);
+  return (apptDate.getTime() - Date.now()) / (1000 * 60 * 60);
 }
 function isValidPhone(p) {
   return /^\d{10}$/.test((p || "").trim());
@@ -116,12 +234,18 @@ function getAllowedSlots(existing, duration, startMin, endMin, maxGap) {
     const combined = [...existing, { start: t, end: t + duration }].sort(
       (a, b) => a.start - b.start
     );
+    // Anchor the gap check to the window's own opening point (startMin) —
+    // not just gaps between existing appointments — so the *first*
+    // appointment of an empty day can't be booked arbitrarily late and
+    // leave a huge idle stretch before it.
+    let prevEnd = startMin;
     let ok = true;
-    for (let i = 1; i < combined.length; i++) {
-      if (combined[i].start - combined[i - 1].end > maxGap) {
+    for (let i = 0; i < combined.length; i++) {
+      if (combined[i].start - prevEnd > maxGap) {
         ok = false;
         break;
       }
+      prevEnd = Math.max(prevEnd, combined[i].end);
     }
     if (ok) res.push(t);
   }
@@ -176,6 +300,13 @@ function SmartBookingApp() {
   const [ownerPassError, setOwnerPassError] = useState("");
   const OWNER_PASSWORD = "777";
 
+  // --- PWA install prompt ---
+  const [deferredInstallPrompt, setDeferredInstallPrompt] = useState(null);
+  const [isIOS, setIsIOS] = useState(false);
+  const [isStandalone, setIsStandalone] = useState(false);
+  const [showIOSTip, setShowIOSTip] = useState(false);
+  const [installBannerDismissed, setInstallBannerDismissed] = useState(false);
+
   function requestOwnerMode() {
     if (ownerUnlocked) {
       setMode("owner");
@@ -222,6 +353,42 @@ function SmartBookingApp() {
     return () => unsub && unsub();
   }, [selectedDate]);
 
+  useEffect(() => {
+    if (settings.businessName) document.title = settings.businessName;
+    setupPWA(settings.businessName);
+  }, [settings.businessName]);
+
+  useEffect(() => {
+    setIsIOS(/iphone|ipad|ipod/i.test(window.navigator.userAgent) && !window.MSStream);
+    setIsStandalone(
+      window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator.standalone === true
+    );
+    const onBeforeInstall = (e) => {
+      e.preventDefault();
+      setDeferredInstallPrompt(e);
+    };
+    const onInstalled = () => {
+      setDeferredInstallPrompt(null);
+      setInstallBannerDismissed(true);
+    };
+    window.addEventListener("beforeinstallprompt", onBeforeInstall);
+    window.addEventListener("appinstalled", onInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onBeforeInstall);
+      window.removeEventListener("appinstalled", onInstalled);
+    };
+  }, []);
+
+  async function handleInstallClick() {
+    if (deferredInstallPrompt) {
+      deferredInstallPrompt.prompt();
+      await deferredInstallPrompt.userChoice;
+      setDeferredInstallPrompt(null);
+    } else if (isIOS) {
+      setShowIOSTip(true);
+    }
+  }
+
   const startMin = settings.businessStart * 60;
   const endMin = settings.businessEnd * 60;
   const selectedService =
@@ -233,16 +400,31 @@ function SmartBookingApp() {
     const now = new Date();
     return now.getHours() * 60 + now.getMinutes();
   }, [selectedDate]);
+  // From leadTimeStartHour onward each day, require booking at least
+  // LEAD_TIME_HOURS ahead of now; before that hour, allow booking from
+  // the very next slot boundary (no extra buffer).
+  const leadTimeStartMin = (settings.leadTimeStartHour ?? 9) * 60;
+  const earliestBookableNow =
+    nowMin >= leadTimeStartMin ? nowMin + LEAD_TIME_HOURS * 60 : nowMin;
   // round up to the next slot boundary so a slot that's already in progress
   // isn't offered
   const effectiveStartMin = isToday
-    ? Math.max(startMin, Math.ceil(nowMin / STEP) * STEP)
+    ? Math.max(startMin, Math.ceil(earliestBookableNow / STEP) * STEP)
     : startMin;
 
-  const existingBlocks = useMemo(
-    () => appointments.map((a) => ({ start: a.start, end: a.end })),
-    [appointments]
+  const dayClosures = useMemo(
+    () => (settings.closures || []).filter((c) => c.date === selectedDate),
+    [settings.closures, selectedDate]
   );
+  const fullDayClosure = dayClosures.find((c) => c.allDay);
+
+  const existingBlocks = useMemo(() => {
+    const apptBlocks = appointments.map((a) => ({ start: a.start, end: a.end }));
+    const closureBlocks = fullDayClosure
+      ? [{ start: startMin, end: endMin }]
+      : dayClosures.map((c) => ({ start: timeToMin(c.startTime), end: timeToMin(c.endTime) }));
+    return [...apptBlocks, ...closureBlocks];
+  }, [appointments, dayClosures, fullDayClosure, startMin, endMin]);
 
   const allowedSlots = useMemo(
     () =>
@@ -256,15 +438,19 @@ function SmartBookingApp() {
   const timelineCells = useMemo(() => {
     const cells = [];
     for (let t = startMin; t < endMin; t += STEP) {
-      const booked = existingBlocks.some((a) => t < a.end && t + STEP > a.start);
+      const closedHere =
+        fullDayClosure ||
+        dayClosures.some((c) => !c.allDay && t < timeToMin(c.endTime) && t + STEP > timeToMin(c.startTime));
+      const booked = existingBlocks.some((a) => t < a.end && t + STEP > a.start) && !closedHere;
       let status = "blocked";
-      if (booked) status = "booked";
+      if (closedHere) status = "closed";
+      else if (booked) status = "booked";
       else if (isToday && t < nowMin) status = "past";
       else if (allowedSet.has(t)) status = "available";
       cells.push({ t, status });
     }
     return cells;
-  }, [startMin, endMin, existingBlocks, allowedSet, isToday, nowMin]);
+  }, [startMin, endMin, existingBlocks, allowedSet, isToday, nowMin, dayClosures, fullDayClosure]);
 
   const morningSlots = allowedSlots.filter((t) => t < 12 * 60);
   const afternoonSlots = allowedSlots.filter((t) => t >= 12 * 60);
@@ -408,6 +594,14 @@ function SmartBookingApp() {
     saveSettings({ ...settings, services });
   }
 
+  function addClosure(closure) {
+    const closures = [...(settings.closures || []), { id: genId(), ...closure }];
+    saveSettings({ ...settings, closures });
+  }
+  function removeClosure(id) {
+    saveSettings({ ...settings, closures: (settings.closures || []).filter((c) => c.id !== id) });
+  }
+
   if (loading) {
     return (
       <div style={{ background: COLORS.bg, minHeight: "100vh" }} className="flex items-center justify-center text-[15px]">
@@ -425,10 +619,10 @@ function SmartBookingApp() {
           <span style={{ color: COLORS.rose }} className="text-lg leading-none">✦</span>
           <div>
             <h1 style={{ fontFamily: "'Frank Ruhl Libre', serif", color: COLORS.ink }} className="text-xl font-bold leading-none">
-              לוח תורים חכם
+              {settings.businessName || DEFAULT_SETTINGS.businessName}
             </h1>
             <p style={{ color: COLORS.muted }} className="text-xs mt-1">
-              בלי חורים סתמיים ביום — תורים נשמרים צמודים אחד לשני
+              {settings.tagline || DEFAULT_SETTINGS.tagline}
             </p>
           </div>
         </div>
@@ -441,6 +635,18 @@ function SmartBookingApp() {
             className="px-3 py-1.5 rounded-full transition-colors">בעלת העסק</button>
         </div>
       </div>
+
+      {!isStandalone && !installBannerDismissed && (deferredInstallPrompt || isIOS) && (
+        <div style={{ background: COLORS.ink }} className="px-5 py-2.5 flex items-center justify-between gap-3 max-w-2xl mx-auto">
+          <p className="text-white text-xs">📲 אפשר להתקין את {settings.businessName || DEFAULT_SETTINGS.businessName} כאפליקציה למסך הבית</p>
+          <div className="flex items-center gap-2 shrink-0">
+            <button onClick={handleInstallClick} style={{ background: COLORS.rose }} className="text-white text-xs px-3 py-1.5 rounded-full font-medium whitespace-nowrap">
+              התקנה
+            </button>
+            <button onClick={() => setInstallBannerDismissed(true)} style={{ color: COLORS.roseSoft }} className="text-xs">✕</button>
+          </div>
+        </div>
+      )}
 
       <div className="px-5 py-4 space-y-5 max-w-2xl mx-auto">
         {mode === "client" && (
@@ -481,6 +687,7 @@ function SmartBookingApp() {
               <span className="flex items-center gap-1"><span style={{ background: COLORS.rose }} className="w-2 h-2 rounded-full inline-block" />תפוס</span>
               <span className="flex items-center gap-1"><span style={{ background: COLORS.sage }} className="w-2 h-2 rounded-full inline-block" />פנוי</span>
               <span className="flex items-center gap-1"><span style={{ background: COLORS.past }} className="w-2 h-2 rounded-full inline-block" />עבר</span>
+              <span className="flex items-center gap-1"><span style={{ background: COLORS.closed }} className="w-2 h-2 rounded-full inline-block" />לא זמינה</span>
             </div>
           </div>
           {apptsLoading ? (
@@ -488,8 +695,8 @@ function SmartBookingApp() {
           ) : (
             <div className="flex gap-[2px]">
               {timelineCells.map((c) => (
-                <div key={c.t} title={`${minToTime(c.t)} · ${c.status === "available" ? "פנוי" : c.status === "past" ? "עבר" : "תפוס"}`}
-                  style={{ background: c.status === "booked" ? COLORS.rose : c.status === "available" ? COLORS.sage : c.status === "past" ? COLORS.past : COLORS.rose, opacity: c.status === "blocked" ? 0.5 : 1 }}
+                <div key={c.t} title={`${minToTime(c.t)} · ${c.status === "available" ? "פנוי" : c.status === "past" ? "עבר" : c.status === "closed" ? "לא זמינה" : "תפוס"}`}
+                  style={{ background: c.status === "booked" ? COLORS.rose : c.status === "available" ? COLORS.sage : c.status === "past" ? COLORS.past : c.status === "closed" ? COLORS.closed : COLORS.rose, opacity: c.status === "blocked" ? 0.5 : 1 }}
                   className="h-6 flex-1 rounded-[2px]" />
               ))}
             </div>
@@ -511,6 +718,8 @@ function SmartBookingApp() {
               myCancelId={myCancelId}
               setMyCancelId={setMyCancelId}
               myCancelAppointment={myCancelAppointment}
+              cancelLimitHours={settings.cancelLimitHours ?? 48}
+              ownerPhone={settings.ownerPhone}
             />
             <ClientBooking
               morningSlots={morningSlots} afternoonSlots={afternoonSlots}
@@ -520,6 +729,7 @@ function SmartBookingApp() {
               confirmBooking={confirmBooking} successMsg={successMsg} setSuccessMsg={setSuccessMsg}
               maxGap={settings.maxGap}
               loggedInClient={loggedInClient}
+              fullDayClosure={fullDayClosure}
             />
           </div>
         ) : (
@@ -530,6 +740,7 @@ function SmartBookingApp() {
             showSettings={showSettings} setShowSettings={setShowSettings}
             settings={settings} saveSettings={saveSettings}
             updateService={updateService} removeService={removeService} addService={addService}
+            addClosure={addClosure} removeClosure={removeClosure}
             saveMsg={saveMsg}
           />
         )}
@@ -562,11 +773,25 @@ function SmartBookingApp() {
           </div>
         </div>
       )}
+
+      {showIOSTip && (
+        <div className="fixed inset-0 flex items-center justify-center z-50" style={{ background: "rgba(43,29,34,0.45)" }}>
+          <div style={{ background: "white", borderColor: COLORS.line }} className="border rounded-2xl p-5 w-[90%] max-w-xs space-y-3 text-center">
+            <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold">התקנה למסך הבית</p>
+            <p className="text-sm">
+              לחצי על כפתור השיתוף <span className="inline-block">⬆️</span> בסרגל הכלים של ספארי, ואז בחרי <strong>"הוסף למסך הבית"</strong>.
+            </p>
+            <button onClick={() => setShowIOSTip(false)} style={{ background: COLORS.rose }} className="text-white text-sm px-4 py-2 rounded-lg font-medium w-full">
+              הבנתי
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function ClientAuth({ loggedInClient, loginOrRegisterClient, logoutClient, myUpcoming, myUpcomingLoading, myCancelId, setMyCancelId, myCancelAppointment }) {
+function ClientAuth({ loggedInClient, loginOrRegisterClient, logoutClient, myUpcoming, myUpcomingLoading, myCancelId, setMyCancelId, myCancelAppointment, cancelLimitHours, ownerPhone }) {
   const [phone, setPhone] = useState("");
   const [name, setName] = useState("");
   const [needsName, setNeedsName] = useState(false);
@@ -611,24 +836,42 @@ function ClientAuth({ loggedInClient, loginOrRegisterClient, logoutClient, myUpc
         ) : myUpcoming.length > 0 ? (
           <div className="space-y-2">
             <p style={{ color: COLORS.muted }} className="text-xs font-medium">התורים העתידיים שלך</p>
-            {myUpcoming.map((a) => (
-              <div key={a.id} style={{ borderColor: COLORS.line, background: COLORS.sageSoft }} className="border rounded-xl p-3 flex items-center justify-between">
-                <div>
-                  <p style={{ fontFamily: "'JetBrains Mono', monospace" }} className="text-sm font-medium">
-                    {a.date} · {minToTime(a.start)}–{minToTime(a.end)}
-                  </p>
-                  <p className="text-sm">{a.serviceName}</p>
-                </div>
-                {myCancelId === a.id ? (
-                  <div className="flex items-center gap-1.5">
-                    <button onClick={() => myCancelAppointment(a)} style={{ background: COLORS.rose }} className="text-white text-xs px-2.5 py-1.5 rounded-lg">אישור ביטול</button>
-                    <button onClick={() => setMyCancelId(null)} style={{ borderColor: COLORS.line }} className="border text-xs px-2.5 py-1.5 rounded-lg">חזרה</button>
+            {myUpcoming.map((a) => {
+              const hoursLeft = hoursUntilAppt(a.date, a.start);
+              const blocked = cancelLimitHours > 0 && hoursLeft < cancelLimitHours;
+              return (
+                <div key={a.id} style={{ borderColor: COLORS.line, background: COLORS.sageSoft }} className="border rounded-xl p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p style={{ fontFamily: "'JetBrains Mono', monospace" }} className="text-sm font-medium">
+                        {a.date} · {minToTime(a.start)}–{minToTime(a.end)}
+                      </p>
+                      <p className="text-sm">{a.serviceName}</p>
+                    </div>
+                    {!blocked && (
+                      myCancelId === a.id ? (
+                        <div className="flex items-center gap-1.5">
+                          <button onClick={() => myCancelAppointment(a)} style={{ background: COLORS.rose }} className="text-white text-xs px-2.5 py-1.5 rounded-lg">אישור ביטול</button>
+                          <button onClick={() => setMyCancelId(null)} style={{ borderColor: COLORS.line }} className="border text-xs px-2.5 py-1.5 rounded-lg">חזרה</button>
+                        </div>
+                      ) : (
+                        <button onClick={() => setMyCancelId(a.id)} style={{ color: COLORS.rose }} className="text-xs font-medium">ביטול / שינוי</button>
+                      )
+                    )}
                   </div>
-                ) : (
-                  <button onClick={() => setMyCancelId(a.id)} style={{ color: COLORS.rose }} className="text-xs font-medium">ביטול / שינוי</button>
-                )}
-              </div>
-            ))}
+                  {blocked && (
+                    <p style={{ color: COLORS.rose }} className="text-xs">
+                      לא ניתן לבטל תור פחות מ-{cancelLimitHours} שעות מראש דרך המערכת.
+                      {ownerPhone ? (
+                        <> יש להתקשר לבעלת העסק בטלפון <a href={`tel:${ownerPhone}`} className="underline font-medium">{ownerPhone}</a> לביטול.</>
+                      ) : (
+                        <> יש להתקשר לבעלת העסק לביטול התור.</>
+                      )}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
             <p style={{ color: COLORS.muted }} className="text-[11px]">
               לשינוי תור: בטלי אותו ואז קבעי תור חדש בזמן הרצוי — הפרטים שלך כבר שמורים.
             </p>
@@ -664,7 +907,7 @@ function ClientAuth({ loggedInClient, loginOrRegisterClient, logoutClient, myUpc
   );
 }
 
-function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelectedSlot, duration, clientName, setClientName, clientPhone, setClientPhone, confirmBooking, successMsg, setSuccessMsg, maxGap, loggedInClient }) {
+function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelectedSlot, duration, clientName, setClientName, clientPhone, setClientPhone, confirmBooking, successMsg, setSuccessMsg, maxGap, loggedInClient, fullDayClosure }) {
   if (successMsg) {
     return (
       <div style={{ background: COLORS.sageSoft, borderColor: COLORS.sage }} className="border rounded-2xl p-5 text-center">
@@ -673,6 +916,16 @@ function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelected
         <button onClick={() => setSuccessMsg("")} style={{ background: COLORS.sage }} className="mt-3 text-white text-sm px-4 py-1.5 rounded-full">
           קביעת תור נוסף
         </button>
+      </div>
+    );
+  }
+  if (fullDayClosure) {
+    return (
+      <div style={{ background: COLORS.closedSoft, borderColor: COLORS.closed }} className="border rounded-2xl p-5 text-center">
+        <div style={{ color: COLORS.closed }} className="text-xl mb-1">🚫</div>
+        <p className="font-medium">העסק לא פעיל בתאריך הזה</p>
+        {fullDayClosure.reason && <p style={{ color: COLORS.muted }} className="text-sm mt-1">{fullDayClosure.reason}</p>}
+        <p style={{ color: COLORS.muted }} className="text-xs mt-1">נסי לבחור תאריך אחר.</p>
       </div>
     );
   }
@@ -742,7 +995,7 @@ function SlotGroup({ label, slots, selectedSlot, onSelect }) {
   );
 }
 
-function OwnerView({ appointments, apptsLoading, confirmCancelId, setConfirmCancelId, cancelAppointment, showSettings, setShowSettings, settings, saveSettings, updateService, removeService, addService, saveMsg }) {
+function OwnerView({ appointments, apptsLoading, confirmCancelId, setConfirmCancelId, cancelAppointment, showSettings, setShowSettings, settings, saveSettings, updateService, removeService, addService, addClosure, removeClosure, saveMsg }) {
   const sorted = [...appointments].sort((a, b) => a.start - b.start);
   return (
     <div className="space-y-4">
@@ -781,6 +1034,21 @@ function OwnerView({ appointments, apptsLoading, confirmCancelId, setConfirmCanc
 
       {showSettings && (
         <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4 space-y-4">
+          <div className="space-y-2">
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-xs block mb-1">שם העסק (כותרת ראשית)</label>
+              <input value={settings.businessName ?? ""} placeholder="לוח תורים חכם"
+                onChange={(e) => saveSettings({ ...settings, businessName: e.target.value })}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            </div>
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-xs block mb-1">כותרת משנה</label>
+              <input value={settings.tagline ?? ""} placeholder="בלי חורים סתמיים ביום — תורים נשמרים צמודים אחד לשני"
+                onChange={(e) => saveSettings({ ...settings, tagline: e.target.value })}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            </div>
+          </div>
+
           <div className="grid grid-cols-3 gap-3">
             <div>
               <label style={{ color: COLORS.muted }} className="text-xs block mb-1">שעת פתיחה</label>
@@ -805,6 +1073,37 @@ function OwnerView({ appointments, apptsLoading, confirmCancelId, setConfirmCanc
           </div>
 
           <div>
+            <label style={{ color: COLORS.muted }} className="text-xs block mb-1">
+              משעה — נדרשות {LEAD_TIME_HOURS} שעות מראש להזמנת תור לאותו יום
+            </label>
+            <select value={settings.leadTimeStartHour ?? 9} onChange={(e) => saveSettings({ ...settings, leadTimeStartHour: Number(e.target.value) })}
+              style={{ borderColor: COLORS.line }} className="w-40 border rounded-lg px-2 py-1.5 text-sm">
+              {Array.from({ length: 24 }, (_, i) => i).map((h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>)}
+            </select>
+            <p style={{ color: COLORS.muted }} className="text-[11px] mt-1">
+              לפני השעה הזו ביום, לקוחה יכולה לקבוע תור לסמוך יותר. מהשעה הזו ואילך, כל תור חדש לאותו יום חייב להיות לפחות {LEAD_TIME_HOURS} שעות קדימה.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-xs block mb-1">הגבלת ביטול (שעות מראש)</label>
+              <input type="number" min={0} step={1} value={settings.cancelLimitHours ?? 48}
+                onChange={(e) => saveSettings({ ...settings, cancelLimitHours: Number(e.target.value) })}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            </div>
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-xs block mb-1">טלפון לביטול ידני</label>
+              <input type="tel" value={settings.ownerPhone || ""} placeholder="050-0000000"
+                onChange={(e) => saveSettings({ ...settings, ownerPhone: e.target.value })}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            </div>
+          </div>
+          <p style={{ color: COLORS.muted }} className="text-[11px] -mt-2">
+            לקוחה לא תוכל לבטל תור עצמאית פחות מ-{settings.cancelLimitHours ?? 48} שעות לפני מועדו, ותופנה להתקשר למספר שהוזן. 0 = ללא הגבלה.
+          </p>
+
+          <div>
             <div className="flex items-center justify-between mb-2">
               <p style={{ color: COLORS.muted }} className="text-xs font-medium">טיפולים</p>
               <button onClick={addService} style={{ color: COLORS.rose }} className="text-xs">+ הוספה</button>
@@ -823,7 +1122,96 @@ function OwnerView({ appointments, apptsLoading, confirmCancelId, setConfirmCanc
               ))}
             </div>
           </div>
+          <div>
+            <p style={{ color: COLORS.muted }} className="text-xs font-medium mb-2">ימים / שעות לא זמינים (חופשה, מחלה, אירוע)</p>
+            <ClosuresManager closures={settings.closures || []} addClosure={addClosure} removeClosure={removeClosure} />
+          </div>
           {saveMsg && <p style={{ color: COLORS.sage }} className="text-xs">{saveMsg}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClosuresManager({ closures, addClosure, removeClosure }) {
+  const [date, setDate] = useState("");
+  const [allDay, setAllDay] = useState(true);
+  const [startTime, setStartTime] = useState("09:00");
+  const [endTime, setEndTime] = useState("17:00");
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState("");
+
+  const todayStr = toKey(new Date());
+  const sorted = [...closures].sort((a, b) => a.date.localeCompare(b.date));
+
+  function handleAdd() {
+    setError("");
+    if (!date) {
+      setError("נא לבחור תאריך");
+      return;
+    }
+    if (!allDay && timeToMin(startTime) >= timeToMin(endTime)) {
+      setError("שעת הסיום חייבת להיות אחרי שעת ההתחלה");
+      return;
+    }
+    addClosure({
+      date,
+      allDay,
+      startTime: allDay ? null : startTime,
+      endTime: allDay ? null : endTime,
+      reason: reason.trim(),
+    });
+    setDate("");
+    setReason("");
+    setAllDay(true);
+  }
+
+  return (
+    <div className="space-y-3">
+      <div style={{ borderColor: COLORS.line }} className="border rounded-xl p-3 space-y-2">
+        <div className="grid grid-cols-2 gap-2">
+          <input type="date" min={todayStr} value={date} onChange={(e) => setDate(e.target.value)}
+            style={{ borderColor: COLORS.line }} className="border rounded-lg px-2 py-1.5 text-sm" />
+          <label className="flex items-center gap-1.5 text-sm">
+            <input type="checkbox" checked={allDay} onChange={(e) => setAllDay(e.target.checked)} />
+            כל היום
+          </label>
+        </div>
+        {!allDay && (
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-[10px] block mb-0.5">משעה</label>
+              <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            </div>
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-[10px] block mb-0.5">עד שעה</label>
+              <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            </div>
+          </div>
+        )}
+        <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="סיבה (חופשה, מחלה, אירוע...) — אופציונלי"
+          style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+        {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
+        <button onClick={handleAdd} style={{ background: COLORS.closed }} className="text-white text-xs px-3 py-1.5 rounded-lg font-medium">
+          + סימון כלא זמינה
+        </button>
+      </div>
+
+      {sorted.length > 0 && (
+        <div className="space-y-1.5">
+          {sorted.map((c) => (
+            <div key={c.id} style={{ borderColor: COLORS.line, background: COLORS.closedSoft }} className="border rounded-lg px-3 py-2 flex items-center justify-between">
+              <div className="text-xs">
+                <span style={{ fontFamily: "'JetBrains Mono', monospace" }} className="font-medium">{c.date}</span>
+                {" · "}
+                {c.allDay ? "כל היום" : `${c.startTime}–${c.endTime}`}
+                {c.reason && <span style={{ color: COLORS.muted }}> · {c.reason}</span>}
+              </div>
+              <button onClick={() => removeClosure(c.id)} style={{ color: COLORS.muted }}>🗑</button>
+            </div>
+          ))}
         </div>
       )}
     </div>
