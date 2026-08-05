@@ -8,6 +8,47 @@
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
+
+<!-- Firebase: shared, real-time storage across every visitor's device -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getFirestore, doc, getDoc, setDoc, onSnapshot
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyArb9Q7WGlUBvjyaQiRyDt7D7G1Dbt9AwY",
+    authDomain: "smartbooking-78d82.firebaseapp.com",
+    projectId: "smartbooking-78d82",
+    storageBucket: "smartbooking-78d82.firebasestorage.app",
+    messagingSenderId: "811077676746",
+    appId: "1:811077676746:web:c5742a1e81e895262b0e33",
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const COLLECTION = "smartbooking";
+
+  // Same interface as before (get/set), plus subscribe() for live updates.
+  window.storage = {
+    get: async (key) => {
+      const snap = await getDoc(doc(db, COLLECTION, key));
+      if (!snap.exists()) throw new Error("not found");
+      return { value: snap.data().value };
+    },
+    set: async (key, value) => {
+      await setDoc(doc(db, COLLECTION, key), { value });
+      return { value };
+    },
+    subscribe: (key, cb) => {
+      return onSnapshot(doc(db, COLLECTION, key), (snap) => {
+        cb(snap.exists() ? snap.data().value : null);
+      });
+    },
+  };
+  window.__storageReady = true;
+</script>
+
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Frank+Ruhl+Libre:wght@500;700&family=Heebo:wght@300;400;500;600;700&family=JetBrains+Mono:wght@500&display=swap');
 body { font-family: 'Heebo', sans-serif; margin: 0; }
@@ -45,19 +86,6 @@ const DEFAULT_SETTINGS = {
 };
 
 const STEP = 15;
-
-// localStorage-backed storage (per-browser, no server involved)
-const storage = {
-  get: async (key) => {
-    const v = localStorage.getItem("sb:" + key);
-    if (v === null) throw new Error("not found");
-    return { value: v };
-  },
-  set: async (key, value) => {
-    localStorage.setItem("sb:" + key, value);
-    return { value };
-  },
-};
 
 function genId() {
   return Math.random().toString(36).slice(2, 10);
@@ -126,39 +154,31 @@ function SmartBookingApp() {
   const [saveMsg, setSaveMsg] = useState("");
 
   useEffect(() => {
-    (async () => {
-      try {
-        const r = await storage.get("settings");
-        const parsed = JSON.parse(r.value);
+    const unsub = window.storage.subscribe("settings", (val) => {
+      if (val) {
+        const parsed = JSON.parse(val);
         setSettings(parsed);
-        if (parsed.services?.length) setSelectedServiceId(parsed.services[0].id);
-      } catch {
+        setSelectedServiceId((prev) => prev || parsed.services?.[0]?.id || null);
+      } else {
         setSettings(DEFAULT_SETTINGS);
         setSelectedServiceId(DEFAULT_SETTINGS.services[0].id);
-        try {
-          await storage.set("settings", JSON.stringify(DEFAULT_SETTINGS));
-        } catch {}
+        window.storage.set("settings", JSON.stringify(DEFAULT_SETTINGS)).catch(() => {});
       }
       setLoading(false);
-    })();
-  }, []);
-
-  const loadAppointments = useCallback(async (dateKey) => {
-    setApptsLoading(true);
-    try {
-      const r = await storage.get(`appts:${dateKey}`);
-      setAppointments(JSON.parse(r.value));
-    } catch {
-      setAppointments([]);
-    }
-    setApptsLoading(false);
+    });
+    return () => unsub && unsub();
   }, []);
 
   useEffect(() => {
-    loadAppointments(selectedDate);
+    setApptsLoading(true);
     setSelectedSlot(null);
     setSuccessMsg("");
-  }, [selectedDate, loadAppointments]);
+    const unsub = window.storage.subscribe(`appts:${selectedDate}`, (val) => {
+      setAppointments(val ? JSON.parse(val) : []);
+      setApptsLoading(false);
+    });
+    return () => unsub && unsub();
+  }, [selectedDate]);
 
   const startMin = settings.businessStart * 60;
   const endMin = settings.businessEnd * 60;
@@ -209,7 +229,7 @@ function SmartBookingApp() {
     const updated = [...appointments, newAppt];
     setAppointments(updated);
     try {
-      await storage.set(`appts:${selectedDate}`, JSON.stringify(updated));
+      await window.storage.set(`appts:${selectedDate}`, JSON.stringify(updated));
     } catch {}
     setSuccessMsg(`נקבע לך תור ל${selectedService.name} בשעה ${minToTime(selectedSlot)}`);
     setSelectedSlot(null);
@@ -222,14 +242,14 @@ function SmartBookingApp() {
     setAppointments(updated);
     setConfirmCancelId(null);
     try {
-      await storage.set(`appts:${selectedDate}`, JSON.stringify(updated));
+      await window.storage.set(`appts:${selectedDate}`, JSON.stringify(updated));
     } catch {}
   }
 
   async function saveSettings(next) {
     setSettings(next);
     try {
-      await storage.set("settings", JSON.stringify(next));
+      await window.storage.set("settings", JSON.stringify(next));
       setSaveMsg("ההגדרות נשמרו");
       setTimeout(() => setSaveMsg(""), 1800);
     } catch {}
@@ -521,7 +541,14 @@ function OwnerView({ appointments, apptsLoading, confirmCancelId, setConfirmCanc
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<SmartBookingApp />);
+function bootstrap() {
+  if (!window.storage) {
+    setTimeout(bootstrap, 20);
+    return;
+  }
+  ReactDOM.createRoot(document.getElementById("root")).render(<SmartBookingApp />);
+}
+bootstrap();
 </script>
 </body>
 </html>
