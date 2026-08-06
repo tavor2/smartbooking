@@ -3,13 +3,20 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>לוח תורים חכם</title>
+<title>מערכת קביעת תורים</title>
 <meta name="theme-color" content="#A83E5C" />
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="קביעת תור" />
-<meta name="description" content="לוח תורים חכם ללא חורים סתמיים ביום" />
+<meta name="description" content="קביעת תורים חכמה" />
+<meta property="og:title" content="מערכת קביעת תורים" />
+<meta property="og:description" content="קביעת תורים חכמה" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="מערכת קביעת תורים" />
+<link rel="manifest" href="./manifest.json" />
+<link rel="icon" href="./icon-32.png" />
+<link rel="apple-touch-icon" href="./icon-180.png" />
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
@@ -102,140 +109,14 @@ const DEFAULT_SETTINGS = {
 
 const STEP = 15;
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "1.5.1";
+const APP_VERSION = "1.6.1";
 
-// --- PWA setup: builds icons + a manifest at runtime (no extra files needed) ---
-function generateIconDataUrl(size) {
-  const canvas = document.createElement("canvas");
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext("2d");
-  const r = size * 0.26;
-
-  // soft pink rounded-square background
-  const grad = ctx.createLinearGradient(0, 0, size, size);
-  grad.addColorStop(0, "#F6D3DD");
-  grad.addColorStop(1, "#F0C9D2");
-  ctx.fillStyle = grad;
-  ctx.beginPath();
-  ctx.moveTo(r, 0);
-  ctx.arcTo(size, 0, size, size, r);
-  ctx.arcTo(size, size, 0, size, r);
-  ctx.arcTo(0, size, 0, 0, r);
-  ctx.arcTo(0, 0, size, 0, r);
-  ctx.closePath();
-  ctx.fill();
-
-  // a stylized polished fingernail — drawn as shapes so it always renders
-  // the same, regardless of whether the device has a colour-emoji font
-  const w = size * 0.34;
-  const h = size * 0.52;
-  const cx = size / 2;
-  const topY = size * 0.24;
-  const bottomY = topY + h;
-
-  ctx.fillStyle = "#A83E5C";
-  ctx.beginPath();
-  ctx.moveTo(cx - w / 2, topY + w / 2);
-  ctx.arc(cx, topY + w / 2, w / 2, Math.PI, 0);
-  ctx.lineTo(cx + w / 2, bottomY - w * 0.18);
-  ctx.quadraticCurveTo(cx + w / 2, bottomY, cx + w / 2 - w * 0.18, bottomY);
-  ctx.lineTo(cx - w / 2 + w * 0.18, bottomY);
-  ctx.quadraticCurveTo(cx - w / 2, bottomY, cx - w / 2, bottomY - w * 0.18);
-  ctx.closePath();
-  ctx.fill();
-
-  // glossy highlight
-  ctx.save();
-  ctx.globalAlpha = 0.45;
-  ctx.fillStyle = "#FFFFFF";
-  ctx.beginPath();
-  ctx.ellipse(cx - w * 0.16, topY + h * 0.3, w * 0.11, h * 0.2, -0.35, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-
-  // cuticle line at the base of the nail
-  ctx.strokeStyle = "rgba(255,255,255,0.55)";
-  ctx.lineWidth = size * 0.012;
-  ctx.beginPath();
-  ctx.arc(cx, bottomY + h * 0.06, w * 0.42, Math.PI * 1.12, Math.PI * 1.88);
-  ctx.stroke();
-
-  return canvas.toDataURL("image/png");
-}
-
-let pwaInitialized = false;
-function setupPWA(businessName) {
-  const name = (businessName || "לוח תורים חכם").trim();
-  const icon192 = generateIconDataUrl(192);
-  const icon512 = generateIconDataUrl(512);
-
-  const manifest = {
-    name,
-    short_name: name.slice(0, 12),
-    description: "לוח תורים חכם ללא חורים סתמיים ביום",
-    start_url: window.location.href.split("#")[0],
-    scope: new URL(".", window.location.href).href,
-    display: "standalone",
-    background_color: "#FBF6F4",
-    theme_color: "#A83E5C",
-    dir: "rtl",
-    lang: "he",
-    icons: [
-      { src: icon192, sizes: "192x192", type: "image/png", purpose: "any maskable" },
-      { src: icon512, sizes: "512x512", type: "image/png", purpose: "any maskable" },
-    ],
-  };
-  const manifestBlob = new Blob([JSON.stringify(manifest)], { type: "application/manifest+json" });
-  const manifestUrl = URL.createObjectURL(manifestBlob);
-
-  let manifestLink = document.querySelector('link[rel="manifest"]');
-  if (!manifestLink) {
-    manifestLink = document.createElement("link");
-    manifestLink.rel = "manifest";
-    document.head.appendChild(manifestLink);
-  }
-  manifestLink.href = manifestUrl;
-
-  let appleIcon = document.querySelector('link[rel="apple-touch-icon"]');
-  if (!appleIcon) {
-    appleIcon = document.createElement("link");
-    appleIcon.rel = "apple-touch-icon";
-    document.head.appendChild(appleIcon);
-  }
-  appleIcon.href = icon192;
-
-  let favicon = document.querySelector('link[rel="icon"]');
-  if (!favicon) {
-    favicon = document.createElement("link");
-    favicon.rel = "icon";
-    document.head.appendChild(favicon);
-  }
-  favicon.href = icon192;
-
-  let appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]');
-  if (!appleTitle) {
-    appleTitle = document.createElement("meta");
-    appleTitle.name = "apple-mobile-web-app-title";
-    document.head.appendChild(appleTitle);
-  }
-  appleTitle.content = name.slice(0, 12);
-
-  if (!pwaInitialized && "serviceWorker" in navigator) {
-    pwaInitialized = true;
-    const swCode = `
-      self.addEventListener('install', () => self.skipWaiting());
-      self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
-      self.addEventListener('fetch', (e) => {
-        e.respondWith(
-          fetch(e.request).catch(() => caches.match(e.request))
-        );
-      });
-    `;
-    const swBlob = new Blob([swCode], { type: "text/javascript" });
-    const swUrl = URL.createObjectURL(swBlob);
-    const pageScope = new URL(".", window.location.href).pathname;
-    navigator.serviceWorker.register(swUrl, { scope: pageScope }).catch(() => {});
+// --- PWA: manifest.json / sw.js / icon-*.png are real files served
+// alongside index.html (see the deployment package) — just register the
+// real service worker here.
+function registerServiceWorker() {
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("./sw.js").catch(() => {});
   }
 }
 
@@ -399,8 +280,11 @@ function SmartBookingApp() {
 
   useEffect(() => {
     if (settings.businessName) document.title = settings.businessName;
-    setupPWA(settings.businessName);
   }, [settings.businessName]);
+
+  useEffect(() => {
+    registerServiceWorker();
+  }, []);
 
   useEffect(() => {
     setIsIOS(/iphone|ipad|ipod/i.test(window.navigator.userAgent) && !window.MSStream);
