@@ -109,7 +109,7 @@ const DEFAULT_SETTINGS = {
 
 const STEP = 15;
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "1.6.1";
+const APP_VERSION = "1.7.0";
 
 // --- PWA: manifest.json / sw.js / icon-*.png are real files served
 // alongside index.html (see the deployment package) — just register the
@@ -177,6 +177,50 @@ function getAllowedSlots(existing, duration, startMin, endMin, maxGap) {
   return res;
 }
 
+// --- Multi-tenant helpers ---
+// The very first business ("original") keeps using the exact same,
+// unprefixed storage keys it always has, so links already shared with
+// clients keep working forever. Every business created afterwards gets
+// its own namespaced keys instead.
+const ORIGINAL_BIZ_ID = "original";
+const LEGACY_OWNER_PASSWORD = "777";
+const REGISTRY_KEY = "businessRegistry";
+
+function scopedKey(bizId, base) {
+  return bizId === ORIGINAL_BIZ_ID ? base : `biz:${bizId}:${base}`;
+}
+
+async function sha256Hex(text) {
+  const enc = new TextEncoder().encode(text);
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function getBusinessRegistry() {
+  try {
+    const res = await window.storage.get(REGISTRY_KEY);
+    return res?.value ? JSON.parse(res.value) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function addToBusinessRegistry(entry) {
+  const list = await getBusinessRegistry();
+  list.push(entry);
+  await window.storage.set(REGISTRY_KEY, JSON.stringify(list));
+  return list;
+}
+
+async function getBusinessRecord(bizId) {
+  try {
+    const res = await window.storage.get(`business:${bizId}`);
+    return res?.value ? JSON.parse(res.value) : null;
+  } catch {
+    return null;
+  }
+}
+
 function generateDates(n) {
   const out = [];
   const today = new Date();
@@ -195,7 +239,7 @@ function generateDates(n) {
   return out;
 }
 
-function SmartBookingApp() {
+function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
   const dates = useMemo(() => generateDates(14), []);
   const [loading, setLoading] = useState(true);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
@@ -223,7 +267,7 @@ function SmartBookingApp() {
   const [showOwnerLogin, setShowOwnerLogin] = useState(false);
   const [ownerPassInput, setOwnerPassInput] = useState("");
   const [ownerPassError, setOwnerPassError] = useState("");
-  const OWNER_PASSWORD = "777";
+  const [ownerPassChecking, setOwnerPassChecking] = useState(false);
 
   // --- PWA install prompt ---
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState(null);
@@ -241,18 +285,37 @@ function SmartBookingApp() {
       setShowOwnerLogin(true);
     }
   }
-  function submitOwnerPassword() {
-    if (ownerPassInput === OWNER_PASSWORD) {
-      setOwnerUnlocked(true);
-      setShowOwnerLogin(false);
-      setMode("owner");
-    } else {
-      setOwnerPassError("סיסמה שגויה");
+  async function submitOwnerPassword() {
+    setOwnerPassError("");
+    if (bizId === ORIGINAL_BIZ_ID) {
+      if (ownerPassInput === LEGACY_OWNER_PASSWORD) {
+        setOwnerUnlocked(true);
+        setShowOwnerLogin(false);
+        setMode("owner");
+      } else {
+        setOwnerPassError("סיסמה שגויה");
+      }
+      return;
     }
+    setOwnerPassChecking(true);
+    try {
+      const biz = await getBusinessRecord(bizId);
+      const hash = await sha256Hex(ownerPassInput);
+      if (biz && hash === biz.passwordHash) {
+        setOwnerUnlocked(true);
+        setShowOwnerLogin(false);
+        setMode("owner");
+      } else {
+        setOwnerPassError("סיסמה שגויה");
+      }
+    } catch {
+      setOwnerPassError("שגיאה באימות, נסי שוב");
+    }
+    setOwnerPassChecking(false);
   }
 
   useEffect(() => {
-    const unsub = window.storage.subscribe("settings", (val) => {
+    const unsub = window.storage.subscribe(scopedKey(bizId, "settings"), (val) => {
       if (val) {
         const parsed = JSON.parse(val);
         setSettings(parsed);
@@ -260,23 +323,23 @@ function SmartBookingApp() {
       } else {
         setSettings(DEFAULT_SETTINGS);
         setSelectedServiceId(DEFAULT_SETTINGS.services[0].id);
-        window.storage.set("settings", JSON.stringify(DEFAULT_SETTINGS)).catch(() => {});
+        window.storage.set(scopedKey(bizId, "settings"), JSON.stringify(DEFAULT_SETTINGS)).catch(() => {});
       }
       setLoading(false);
     });
     return () => unsub && unsub();
-  }, []);
+  }, [bizId]);
 
   useEffect(() => {
     setApptsLoading(true);
     setSelectedSlot(null);
     setSuccessMsg("");
-    const unsub = window.storage.subscribe(`appts:${selectedDate}`, (val) => {
+    const unsub = window.storage.subscribe(scopedKey(bizId, `appts:${selectedDate}`), (val) => {
       setAppointments(val ? JSON.parse(val) : []);
       setApptsLoading(false);
     });
     return () => unsub && unsub();
-  }, [selectedDate]);
+  }, [selectedDate, bizId]);
 
   useEffect(() => {
     if (settings.businessName) document.title = settings.businessName;
@@ -397,13 +460,13 @@ function SmartBookingApp() {
     const updated = [...appointments, newAppt];
     setAppointments(updated);
     try {
-      await window.storage.set(`appts:${selectedDate}`, JSON.stringify(updated));
+      await window.storage.set(scopedKey(bizId, `appts:${selectedDate}`), JSON.stringify(updated));
     } catch {}
     if (newAppt.clientPhone && isValidPhone(newAppt.clientPhone)) {
       const list = await getClientAppts(newAppt.clientPhone);
       const updatedList = [...list, { ...newAppt, date: selectedDate }];
       try {
-        await window.storage.set(`clientAppts:${newAppt.clientPhone}`, JSON.stringify(updatedList));
+        await window.storage.set(scopedKey(bizId, `clientAppts:${newAppt.clientPhone}`), JSON.stringify(updatedList));
       } catch {}
       if (loggedInClient?.phone === newAppt.clientPhone) {
         setMyUpcoming(updatedList.filter((a) => isUpcoming(a)));
@@ -423,7 +486,7 @@ function SmartBookingApp() {
     setAppointments(updated);
     setConfirmCancelId(null);
     try {
-      await window.storage.set(`appts:${selectedDate}`, JSON.stringify(updated));
+      await window.storage.set(scopedKey(bizId, `appts:${selectedDate}`), JSON.stringify(updated));
     } catch {}
     if (cancelled?.clientPhone) {
       await removeFromClientIndex(cancelled.clientPhone, id);
@@ -433,7 +496,7 @@ function SmartBookingApp() {
   // --- client identity helpers ---
   async function getClientAppts(phone) {
     try {
-      const res = await window.storage.get(`clientAppts:${phone}`);
+      const res = await window.storage.get(scopedKey(bizId, `clientAppts:${phone}`));
       return res?.value ? JSON.parse(res.value) : [];
     } catch {
       return [];
@@ -444,7 +507,7 @@ function SmartBookingApp() {
     const list = await getClientAppts(phone);
     const updated = list.filter((a) => a.id !== id);
     try {
-      await window.storage.set(`clientAppts:${phone}`, JSON.stringify(updated));
+      await window.storage.set(scopedKey(bizId, `clientAppts:${phone}`), JSON.stringify(updated));
     } catch {}
     if (loggedInClient?.phone === phone) {
       setMyUpcoming(updated.filter((a) => isUpcoming(a)));
@@ -471,7 +534,7 @@ function SmartBookingApp() {
   async function loginOrRegisterClient(phone, name) {
     const profile = { name: name.trim(), phone: phone.trim() };
     try {
-      await window.storage.set(`client:${phone}`, JSON.stringify(profile));
+      await window.storage.set(scopedKey(bizId, `client:${phone}`), JSON.stringify(profile));
     } catch {}
     setLoggedInClient(profile);
     setClientName(profile.name);
@@ -489,10 +552,10 @@ function SmartBookingApp() {
   async function myCancelAppointment(appt) {
     // remove from that day's appts list
     try {
-      const res = await window.storage.get(`appts:${appt.date}`);
+      const res = await window.storage.get(scopedKey(bizId, `appts:${appt.date}`));
       const dayList = res?.value ? JSON.parse(res.value) : [];
       const updatedDay = dayList.filter((a) => a.id !== appt.id);
-      await window.storage.set(`appts:${appt.date}`, JSON.stringify(updatedDay));
+      await window.storage.set(scopedKey(bizId, `appts:${appt.date}`), JSON.stringify(updatedDay));
       if (appt.date === selectedDate) setAppointments(updatedDay);
     } catch {}
     await removeFromClientIndex(appt.clientPhone, appt.id);
@@ -502,7 +565,7 @@ function SmartBookingApp() {
   async function saveSettings(next) {
     setSettings(next);
     try {
-      await window.storage.set("settings", JSON.stringify(next));
+      await window.storage.set(scopedKey(bizId, "settings"), JSON.stringify(next));
       setSaveMsg("ההגדרות נשמרו");
       setTimeout(() => setSaveMsg(""), 1800);
     } catch {}
@@ -638,6 +701,7 @@ function SmartBookingApp() {
         {mode === "client" ? (
           <div className="space-y-4">
             <ClientAuth
+              bizId={bizId}
               loggedInClient={loggedInClient}
               loginOrRegisterClient={loginOrRegisterClient}
               logoutClient={logoutClient}
@@ -674,8 +738,19 @@ function SmartBookingApp() {
         )}
       </div>
 
-      <div className="text-center pb-4">
+      <div className="text-center pb-4 space-y-1">
         <p style={{ color: COLORS.muted }} className="text-[10px]">גרסה {APP_VERSION}</p>
+        <p className="text-[11px]">
+          <a href="?register=1" style={{ color: COLORS.rose }} className="font-medium">🏪 פתיחת עסק חדש באפליקציה</a>
+          <span style={{ color: COLORS.muted }}> · </span>
+          <a href="?login=1" style={{ color: COLORS.muted }}>כניסה לעסק קיים</a>
+          {bizId !== ORIGINAL_BIZ_ID && (
+            <>
+              <span style={{ color: COLORS.muted }}> · </span>
+              <a href="./" style={{ color: COLORS.muted }}>לעסק המקורי</a>
+            </>
+          )}
+        </p>
       </div>
 
       {showOwnerLogin && (
@@ -687,7 +762,6 @@ function SmartBookingApp() {
               onChange={(e) => { setOwnerPassInput(e.target.value); setOwnerPassError(""); }}
               onKeyDown={(e) => { if (e.key === "Enter") submitOwnerPassword(); }}
               type="password"
-              inputMode="numeric"
               autoFocus
               placeholder="סיסמה"
               style={{ borderColor: COLORS.line, fontFamily: "'JetBrains Mono', monospace" }}
@@ -695,8 +769,8 @@ function SmartBookingApp() {
             />
             {ownerPassError && <p style={{ color: COLORS.rose }} className="text-xs text-center">{ownerPassError}</p>}
             <div className="flex gap-2">
-              <button onClick={submitOwnerPassword} style={{ background: COLORS.rose }} className="flex-1 text-white text-sm py-2 rounded-lg font-medium">
-                כניסה
+              <button onClick={submitOwnerPassword} disabled={ownerPassChecking} style={{ background: COLORS.rose }} className="flex-1 text-white text-sm py-2 rounded-lg font-medium disabled:opacity-60">
+                {ownerPassChecking ? "בודקת..." : "כניסה"}
               </button>
               <button onClick={() => setShowOwnerLogin(false)} style={{ borderColor: COLORS.line, color: COLORS.muted }} className="border px-4 py-2 rounded-lg text-sm">
                 ביטול
@@ -723,7 +797,7 @@ function SmartBookingApp() {
   );
 }
 
-function ClientAuth({ loggedInClient, loginOrRegisterClient, logoutClient, myUpcoming, myUpcomingLoading, myCancelId, setMyCancelId, myCancelAppointment, cancelLimitHours, ownerPhone }) {
+function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient, myUpcoming, myUpcomingLoading, myCancelId, setMyCancelId, myCancelAppointment, cancelLimitHours, ownerPhone }) {
   const [phone, setPhone] = useState("");
   const [name, setName] = useState("");
   const [needsName, setNeedsName] = useState(false);
@@ -746,7 +820,7 @@ function ClientAuth({ loggedInClient, loginOrRegisterClient, logoutClient, myUpc
     }
     setChecking(true);
     try {
-      const res = await window.storage.get(`client:${phone}`);
+      const res = await window.storage.get(scopedKey(bizId, `client:${phone}`));
       const profile = JSON.parse(res.value);
       await loginOrRegisterClient(profile.phone, profile.name);
     } catch {
@@ -1150,12 +1224,260 @@ function ClosuresManager({ closures, addClosure, removeClosure }) {
   );
 }
 
+function CenteredScreen({ children }) {
+  return (
+    <div style={{ background: COLORS.bg, minHeight: "100vh" }} className="flex items-center justify-center px-5">
+      <div style={{ background: "white", borderColor: COLORS.line }} className="border rounded-2xl p-6 w-full max-w-sm space-y-4">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function goTo(href) {
+  window.location.href = href;
+}
+
+// --- Business registration: any owner can spin up her own booking page ---
+function BusinessRegister() {
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [created, setCreated] = useState(null); // { id, link }
+
+  async function handleSubmit() {
+    setError("");
+    if (!name.trim()) return setError("נא להזין שם עסק");
+    if (!isValidPhone(phone)) return setError("מספר טלפון חייב להכיל 10 ספרות");
+    if (password.length < 4) return setError("הסיסמה חייבת להכיל לפחות 4 תווים");
+    if (password !== confirmPassword) return setError("הסיסמאות אינן תואמות");
+
+    setSubmitting(true);
+    try {
+      const id = genId();
+      const passwordHash = await sha256Hex(password);
+      const newSettings = { ...DEFAULT_SETTINGS, businessName: name.trim(), ownerPhone: phone.trim() };
+      await window.storage.set(`business:${id}`, JSON.stringify({
+        id, businessName: name.trim(), ownerPhone: phone.trim(), passwordHash, createdAt: Date.now(),
+      }));
+      await window.storage.set(scopedKey(id, "settings"), JSON.stringify(newSettings));
+      await addToBusinessRegistry({ id, name: name.trim(), phone: phone.trim() });
+      const link = `${window.location.origin}${window.location.pathname}?biz=${id}`;
+      setCreated({ id, link });
+    } catch {
+      setError("קרתה תקלה ביצירת העסק, נסי שוב");
+    }
+    setSubmitting(false);
+  }
+
+  if (created) {
+    return (
+      <CenteredScreen>
+        <div style={{ color: COLORS.sage }} className="text-2xl text-center">✓</div>
+        <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">העסק נוצר בהצלחה!</p>
+        <p style={{ color: COLORS.muted }} className="text-sm text-center">
+          זה הקישור של העסק שלך — שלחי אותו ללקוחות שלך כדי שיוכלו לקבוע תור ישירות אצלך.
+        </p>
+        <div style={{ borderColor: COLORS.line, background: COLORS.bg }} className="border rounded-lg p-3 text-xs break-all" dir="ltr">
+          {created.link}
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={() => navigator.clipboard?.writeText(created.link).catch(() => {})}
+            style={{ borderColor: COLORS.line, color: COLORS.ink }}
+            className="border flex-1 py-2 rounded-lg text-sm font-medium">
+            העתקת קישור
+          </button>
+          <button onClick={() => goTo(created.link)} style={{ background: COLORS.rose }} className="flex-1 text-white py-2 rounded-lg text-sm font-medium">
+            כניסה לעסק שלי
+          </button>
+        </div>
+      </CenteredScreen>
+    );
+  }
+
+  return (
+    <CenteredScreen>
+      <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">פתיחת עסק חדש</p>
+      <p style={{ color: COLORS.muted }} className="text-xs text-center">
+        תוך דקה יהיה לך לוח תורים משלך, עם קישור אישי לשליחה ללקוחות.
+      </p>
+      <div className="space-y-2">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="שם העסק"
+          style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+        <input value={phone} onChange={(e) => setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))} placeholder="טלפון (10 ספרות)" type="tel" inputMode="numeric"
+          style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+        <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="סיסמה (לתפריט בעלת העסק)" type="password"
+          style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+        <input value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="אימות סיסמה" type="password"
+          style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+      </div>
+      {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
+      <button onClick={handleSubmit} disabled={submitting} style={{ background: COLORS.rose }} className="w-full text-white py-2 rounded-lg text-sm font-medium disabled:opacity-60">
+        {submitting ? "יוצרת..." : "יצירת העסק"}
+      </button>
+      <p className="text-center text-xs">
+        <a href="?login=1" style={{ color: COLORS.muted }}>יש לך כבר עסק? כניסה לפי טלפון</a>
+      </p>
+      <p className="text-center text-xs">
+        <a href="./" style={{ color: COLORS.muted }}>ביטול</a>
+      </p>
+    </CenteredScreen>
+  );
+}
+
+// --- Business login: for an owner who lost her link, find it by phone + password ---
+function BusinessLogin() {
+  const [phone, setPhone] = useState("");
+  const [matches, setMatches] = useState(null); // list of {id, name, phone}
+  const [selected, setSelected] = useState(null);
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [checking, setChecking] = useState(false);
+
+  async function handleFind() {
+    setError("");
+    if (!isValidPhone(phone)) return setError("מספר טלפון חייב להכיל 10 ספרות");
+    setChecking(true);
+    const registry = await getBusinessRegistry();
+    const found = registry.filter((b) => b.phone === phone);
+    setChecking(false);
+    if (found.length === 0) {
+      setError("לא נמצא עסק עם מספר הטלפון הזה");
+      return;
+    }
+    setMatches(found);
+    if (found.length === 1) setSelected(found[0]);
+  }
+
+  async function handleLogin() {
+    setError("");
+    if (!selected) return;
+    setChecking(true);
+    try {
+      const biz = await getBusinessRecord(selected.id);
+      const hash = await sha256Hex(password);
+      if (biz && hash === biz.passwordHash) {
+        goTo(`${window.location.origin}${window.location.pathname}?biz=${selected.id}`);
+        return;
+      }
+      setError("סיסמה שגויה");
+    } catch {
+      setError("קרתה תקלה, נסי שוב");
+    }
+    setChecking(false);
+  }
+
+  if (matches && selected) {
+    return (
+      <CenteredScreen>
+        <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">כניסה ל{selected.name}</p>
+        <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="סיסמה"
+          onKeyDown={(e) => { if (e.key === "Enter") handleLogin(); }}
+          type="password" autoFocus
+          style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+        {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
+        <button onClick={handleLogin} disabled={checking} style={{ background: COLORS.rose }} className="w-full text-white py-2 rounded-lg text-sm font-medium disabled:opacity-60">
+          {checking ? "בודקת..." : "כניסה"}
+        </button>
+        {matches.length > 1 && (
+          <button onClick={() => setSelected(null)} style={{ color: COLORS.muted }} className="w-full text-xs">בחירת עסק אחר</button>
+        )}
+      </CenteredScreen>
+    );
+  }
+
+  if (matches && matches.length > 1) {
+    return (
+      <CenteredScreen>
+        <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">נמצאו כמה עסקים</p>
+        <div className="space-y-2">
+          {matches.map((b) => (
+            <button key={b.id} onClick={() => setSelected(b)} style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm text-right">
+              {b.name}
+            </button>
+          ))}
+        </div>
+      </CenteredScreen>
+    );
+  }
+
+  return (
+    <CenteredScreen>
+      <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">כניסה לעסק קיים</p>
+      <p style={{ color: COLORS.muted }} className="text-xs text-center">שכחת את הקישור לעסק שלך? נאתר אותו לפי מספר הטלפון.</p>
+      <input value={phone} onChange={(e) => { setPhone(e.target.value.replace(/\D/g, "").slice(0, 10)); setError(""); }}
+        placeholder="טלפון (10 ספרות)" type="tel" inputMode="numeric"
+        onKeyDown={(e) => { if (e.key === "Enter") handleFind(); }}
+        style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+      {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
+      <button onClick={handleFind} disabled={checking} style={{ background: COLORS.rose }} className="w-full text-white py-2 rounded-lg text-sm font-medium disabled:opacity-60">
+        {checking ? "מחפשת..." : "איתור העסק שלי"}
+      </button>
+      <p className="text-center text-xs">
+        <a href="?register=1" style={{ color: COLORS.muted }}>אין לך עסק עדיין? פתיחת עסק חדש</a>
+      </p>
+      <p className="text-center text-xs">
+        <a href="./" style={{ color: COLORS.muted }}>ביטול</a>
+      </p>
+    </CenteredScreen>
+  );
+}
+
+// --- Resolves ?biz=<id> to a real business before rendering the app ---
+function BizGateway({ bizId }) {
+  const [status, setStatus] = useState("checking"); // checking | found | missing
+
+  useEffect(() => {
+    let cancelled = false;
+    getBusinessRecord(bizId).then((biz) => {
+      if (!cancelled) setStatus(biz ? "found" : "missing");
+    });
+    return () => { cancelled = true; };
+  }, [bizId]);
+
+  if (status === "checking") {
+    return (
+      <div style={{ background: COLORS.bg, minHeight: "100vh" }} className="flex items-center justify-center text-[15px]">
+        <span style={{ color: COLORS.muted }}>טוען...</span>
+      </div>
+    );
+  }
+  if (status === "missing") {
+    return (
+      <CenteredScreen>
+        <div style={{ color: COLORS.closed }} className="text-2xl text-center">🚫</div>
+        <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">העסק לא נמצא</p>
+        <p style={{ color: COLORS.muted }} className="text-xs text-center">הקישור שגוי או שהעסק הוסר.</p>
+        <a href="?register=1" style={{ background: COLORS.rose }} className="block text-center text-white py-2 rounded-lg text-sm font-medium">
+          פתיחת עסק חדש
+        </a>
+        <a href="?login=1" style={{ color: COLORS.muted }} className="block text-center text-xs">כניסה לעסק קיים</a>
+      </CenteredScreen>
+    );
+  }
+  return <SmartBookingApp bizId={bizId} />;
+}
+
+// --- Top-level router based on the URL: ?register=1 / ?login=1 / ?biz=<id> / default (original) ---
+function Root() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has("register")) return <BusinessRegister />;
+  if (params.has("login")) return <BusinessLogin />;
+  const bizParam = params.get("biz");
+  if (bizParam) return <BizGateway bizId={bizParam} />;
+  return <SmartBookingApp bizId={ORIGINAL_BIZ_ID} />;
+}
+
 function bootstrap() {
   if (!window.storage) {
     setTimeout(bootstrap, 20);
     return;
   }
-  ReactDOM.createRoot(document.getElementById("root")).render(<SmartBookingApp />);
+  ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
 }
 bootstrap();
 </script>
