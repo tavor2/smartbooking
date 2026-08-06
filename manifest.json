@@ -1,7 +1,7 @@
 {
   "name": "לוח תורים חכם",
   "short_name": "קביעת תור",
-  "description": "לוח תורים חכם ללא חורים סתמיים ביום",
+  "description": "קביעת תורים חכמה לכל בעלת עסק",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
