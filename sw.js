@@ -1,4 +1,4 @@
-// Bump this on every deploy so old caches get cleared out automatically.
+// Bump to this on every deploy so old caches get cleared out automatically.
 const CACHE_NAME = "smart-booking-v2";
 
 const APP_SHELL = [
