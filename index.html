@@ -103,7 +103,7 @@ const DEFAULT_SETTINGS = {
 
 const STEP = 15;
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "1.9.0";
+const APP_VERSION = "1.10.0";
 
 // --- Service worker only: kept for basic offline caching. The "add to
 // home screen" / installable-PWA feature was removed — with many
@@ -182,6 +182,10 @@ function getAllowedSlots(existing, duration, startMin, endMin, maxGap) {
 const ORIGINAL_BIZ_ID = "original";
 const LEGACY_OWNER_PASSWORD = "777";
 const REGISTRY_KEY = "businessRegistry";
+// Super-admin oversight mode (?admin=1) — password isn't stored in plaintext
+// in the source, only its hash. Current password: given to Yaron directly.
+const ADMIN_PASSWORD_HASH = "9da38c3e715e308d49dc54055eaab48be8aac6ed1802c25b972ace3ff52866fb";
+const ADMIN_SESSION_KEY = "sb_admin_auth";
 
 function scopedKey(bizId, base) {
   return bizId === ORIGINAL_BIZ_ID ? base : `biz:${bizId}:${base}`;
@@ -275,6 +279,18 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
       setShowOwnerLogin(true);
     }
   }
+
+  // --- admin oversight: entering via the admin panel (?adminEnter=1) skips
+  // this business's own owner password, but only if the browser tab already
+  // holds a valid admin session (set after the admin password was verified).
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("adminEnter") === "1" && sessionStorage.getItem(ADMIN_SESSION_KEY) === "1") {
+      setOwnerUnlocked(true);
+      setMode("owner");
+    }
+  }, []);
+
   async function submitOwnerPassword() {
     setOwnerPassError("");
     if (bizId === ORIGINAL_BIZ_ID) {
@@ -1496,6 +1512,100 @@ function BizGateway({ bizId }) {
 }
 
 // --- Landing page shown at the bare app URL (no ?biz=, ?login=, ?register=) ---
+// --- Super-admin oversight mode: see every business, jump into any of them ---
+function AdminGate({ children }) {
+  const [authed, setAuthed] = useState(() => sessionStorage.getItem(ADMIN_SESSION_KEY) === "1");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [checking, setChecking] = useState(false);
+
+  async function handleSubmit() {
+    setError("");
+    setChecking(true);
+    const hash = await sha256Hex(password);
+    setChecking(false);
+    if (hash === ADMIN_PASSWORD_HASH) {
+      sessionStorage.setItem(ADMIN_SESSION_KEY, "1");
+      setAuthed(true);
+    } else {
+      setError("סיסמה שגויה");
+    }
+  }
+
+  if (authed) return children;
+
+  return (
+    <CenteredScreen>
+      <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">כניסת פיקוח</p>
+      <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="סיסמת פיקוח" type="password" autoFocus
+        onKeyDown={(e) => { if (e.key === "Enter") handleSubmit(); }}
+        style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+      {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
+      <button onClick={handleSubmit} disabled={checking} style={{ background: COLORS.rose }} className="w-full text-white py-2 rounded-lg text-sm font-medium disabled:opacity-60">
+        {checking ? "בודקת..." : "כניסה"}
+      </button>
+    </CenteredScreen>
+  );
+}
+
+function AdminDashboard() {
+  const [businesses, setBusinesses] = useState(null); // null = loading
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const registry = await getBusinessRegistry();
+      let originalName = "העסק המקורי";
+      try {
+        const res = await window.storage.get("settings");
+        if (res?.value) originalName = JSON.parse(res.value).businessName || originalName;
+      } catch {}
+      const list = [{ id: ORIGINAL_BIZ_ID, name: originalName, phone: "" }, ...registry];
+      if (!cancelled) setBusinesses(list);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  function logoutAdmin() {
+    sessionStorage.removeItem(ADMIN_SESSION_KEY);
+    goTo(`${window.location.origin}${window.location.pathname}`);
+  }
+
+  return (
+    <div style={{ background: COLORS.bg, minHeight: "100vh" }} className="px-5 py-6">
+      <div className="max-w-sm mx-auto space-y-4">
+        <div className="flex items-center justify-between">
+          <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold">מצב פיקוח</p>
+          <button onClick={logoutAdmin} style={{ color: COLORS.muted }} className="text-xs">יציאה</button>
+        </div>
+        <p style={{ color: COLORS.muted }} className="text-xs">
+          {businesses ? `${businesses.length} עסקים` : "טוענת..."}
+        </p>
+        <div className="space-y-2">
+          {businesses && businesses.map((b) => (
+            <div key={b.id} style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-xl p-3 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-sm font-medium truncate">{b.name}</p>
+                <p style={{ color: COLORS.muted }} className="text-xs" dir="ltr">
+                  {b.phone ? `${b.phone} · ` : ""}{b.id}
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <a href={`?biz=${b.id}`} style={{ borderColor: COLORS.line, color: COLORS.ink }} className="border text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap">
+                  צפייה
+                </a>
+                <a href={`?biz=${b.id}&adminEnter=1`} style={{ background: COLORS.rose }} className="text-white text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap">
+                  כניסה כבעלים
+                </a>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Landing() {
   return (
     <div style={{ background: COLORS.bg, minHeight: "100vh" }} className="flex items-center justify-center px-5">
@@ -1522,11 +1632,12 @@ function Landing() {
   );
 }
 
-// --- Top-level router based on the URL: ?register=1 / ?login=1 / ?biz=<id> / default landing ---
+// --- Top-level router based on the URL: ?register=1 / ?login=1 / ?biz=<id> / ?admin=1 / default landing ---
 function Root() {
   const params = new URLSearchParams(window.location.search);
   if (params.has("register")) return <BusinessRegister />;
   if (params.has("login")) return <BusinessLogin />;
+  if (params.has("admin")) return <AdminGate><AdminDashboard /></AdminGate>;
   const bizParam = params.get("biz");
   // The original business predates the registry, so it has no `business:<id>`
   // record for BizGateway to look up — go straight to it instead.
