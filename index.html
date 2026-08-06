@@ -5,18 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>מערכת קביעת תורים</title>
 <meta name="theme-color" content="#A83E5C" />
-<meta name="mobile-web-app-capable" content="yes" />
-<meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<meta name="apple-mobile-web-app-title" content="קביעת תור" />
 <meta name="description" content="קביעת תורים חכמה" />
 <meta property="og:title" content="מערכת קביעת תורים" />
 <meta property="og:description" content="קביעת תורים חכמה" />
 <meta property="og:type" content="website" />
 <meta property="og:site_name" content="מערכת קביעת תורים" />
-<link rel="manifest" href="./manifest.json" />
 <link rel="icon" href="./icon-32.png" />
-<link rel="apple-touch-icon" href="./icon-180.png" />
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
@@ -109,11 +103,14 @@ const DEFAULT_SETTINGS = {
 
 const STEP = 15;
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "1.7.3";
+const APP_VERSION = "1.9.0";
 
-// --- PWA: manifest.json / sw.js / icon-*.png are real files served
-// alongside index.html (see the deployment package) — just register the
-// real service worker here.
+// --- Service worker only: kept for basic offline caching. The "add to
+// home screen" / installable-PWA feature was removed — with many
+// self-registered businesses sharing this one static site, Chrome/iOS
+// have no way to tell their shortcuts apart (they'd all point back to
+// the same generic start_url), so a home-screen icon could silently
+// open the wrong business. See sw.js.
 function registerServiceWorker() {
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("./sw.js").catch(() => {});
@@ -269,13 +266,6 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
   const [ownerPassError, setOwnerPassError] = useState("");
   const [ownerPassChecking, setOwnerPassChecking] = useState(false);
 
-  // --- PWA install prompt ---
-  const [deferredInstallPrompt, setDeferredInstallPrompt] = useState(null);
-  const [isIOS, setIsIOS] = useState(false);
-  const [isStandalone, setIsStandalone] = useState(false);
-  const [showIOSTip, setShowIOSTip] = useState(false);
-  const [installBannerDismissed, setInstallBannerDismissed] = useState(false);
-
   function requestOwnerMode() {
     if (ownerUnlocked) {
       setMode("owner");
@@ -348,37 +338,6 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
   useEffect(() => {
     registerServiceWorker();
   }, []);
-
-  useEffect(() => {
-    setIsIOS(/iphone|ipad|ipod/i.test(window.navigator.userAgent) && !window.MSStream);
-    setIsStandalone(
-      window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator.standalone === true
-    );
-    const onBeforeInstall = (e) => {
-      e.preventDefault();
-      setDeferredInstallPrompt(e);
-    };
-    const onInstalled = () => {
-      setDeferredInstallPrompt(null);
-      setInstallBannerDismissed(true);
-    };
-    window.addEventListener("beforeinstallprompt", onBeforeInstall);
-    window.addEventListener("appinstalled", onInstalled);
-    return () => {
-      window.removeEventListener("beforeinstallprompt", onBeforeInstall);
-      window.removeEventListener("appinstalled", onInstalled);
-    };
-  }, []);
-
-  async function handleInstallClick() {
-    if (deferredInstallPrompt) {
-      deferredInstallPrompt.prompt();
-      await deferredInstallPrompt.userChoice;
-      setDeferredInstallPrompt(null);
-    } else if (isIOS) {
-      setShowIOSTip(true);
-    }
-  }
 
   const startMin = settings.businessStart * 60;
   const endMin = settings.businessEnd * 60;
@@ -627,18 +586,6 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
         </div>
       </div>
 
-      {!isStandalone && !installBannerDismissed && (deferredInstallPrompt || isIOS) && (
-        <div style={{ background: COLORS.ink }} className="px-5 py-2.5 flex items-center justify-between gap-3 max-w-2xl mx-auto">
-          <p className="text-white text-xs">📲 אפשר להתקין את {settings.businessName || DEFAULT_SETTINGS.businessName} כאפליקציה למסך הבית</p>
-          <div className="flex items-center gap-2 shrink-0">
-            <button onClick={handleInstallClick} style={{ background: COLORS.rose }} className="text-white text-xs px-3 py-1.5 rounded-full font-medium whitespace-nowrap">
-              התקנה
-            </button>
-            <button onClick={() => setInstallBannerDismissed(true)} style={{ color: COLORS.roseSoft }} className="text-xs">✕</button>
-          </div>
-        </div>
-      )}
-
       <div className="px-5 py-4 space-y-5 max-w-2xl mx-auto">
         {mode === "client" && (
           <div>
@@ -745,12 +692,6 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
           <a href="?register=1" style={{ color: COLORS.rose }} className="font-medium">🏪 פתיחת עסק חדש באפליקציה</a>
           <span style={{ color: COLORS.muted }}> · </span>
           <a href="?login=1" style={{ color: COLORS.muted }}>כניסה לעסק קיים</a>
-          {bizId !== ORIGINAL_BIZ_ID && (
-            <>
-              <span style={{ color: COLORS.muted }}> · </span>
-              <a href="./" style={{ color: COLORS.muted }}>לעסק המקורי</a>
-            </>
-          )}
         </p>
       </div>
 
@@ -777,20 +718,6 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
                 ביטול
               </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {showIOSTip && (
-        <div className="fixed inset-0 flex items-center justify-center z-50" style={{ background: "rgba(43,29,34,0.45)" }}>
-          <div style={{ background: "white", borderColor: COLORS.line }} className="border rounded-2xl p-5 w-[90%] max-w-xs space-y-3 text-center">
-            <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold">התקנה למסך הבית</p>
-            <p className="text-sm">
-              לחצי על כפתור השיתוף <span className="inline-block">⬆️</span> בסרגל הכלים של ספארי, ואז בחרי <strong>"הוסף למסך הבית"</strong>.
-            </p>
-            <button onClick={() => setShowIOSTip(false)} style={{ background: COLORS.rose }} className="text-white text-sm px-4 py-2 rounded-lg font-medium w-full">
-              הבנתי
-            </button>
           </div>
         </div>
       )}
@@ -1568,14 +1495,44 @@ function BizGateway({ bizId }) {
   return <SmartBookingApp bizId={bizId} />;
 }
 
-// --- Top-level router based on the URL: ?register=1 / ?login=1 / ?biz=<id> / default (original) ---
+// --- Landing page shown at the bare app URL (no ?biz=, ?login=, ?register=) ---
+function Landing() {
+  return (
+    <div style={{ background: COLORS.bg, minHeight: "100vh" }} className="flex items-center justify-center px-5">
+      <div className="w-full max-w-sm text-center space-y-6">
+        <div>
+          <span style={{ color: COLORS.rose }} className="text-3xl leading-none">✦</span>
+          <h1 style={{ fontFamily: "'Frank Ruhl Libre', serif", color: COLORS.ink }} className="text-2xl font-bold mt-2">
+            לוח תורים חכם
+          </h1>
+          <p style={{ color: COLORS.muted }} className="text-sm mt-1">
+            קביעת תורים חכמה לכל בעלת עסק
+          </p>
+        </div>
+        <div className="space-y-3">
+          <a href="?login=1" style={{ background: COLORS.rose }} className="block text-white py-3 rounded-xl text-sm font-medium">
+            כניסה לעסק קיים
+          </a>
+          <a href="?register=1" style={{ borderColor: COLORS.rose, color: COLORS.rose }} className="block border-2 py-3 rounded-xl text-sm font-medium">
+            🏪 פתיחת עסק חדש
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- Top-level router based on the URL: ?register=1 / ?login=1 / ?biz=<id> / default landing ---
 function Root() {
   const params = new URLSearchParams(window.location.search);
   if (params.has("register")) return <BusinessRegister />;
   if (params.has("login")) return <BusinessLogin />;
   const bizParam = params.get("biz");
+  // The original business predates the registry, so it has no `business:<id>`
+  // record for BizGateway to look up — go straight to it instead.
+  if (bizParam === ORIGINAL_BIZ_ID) return <SmartBookingApp bizId={ORIGINAL_BIZ_ID} />;
   if (bizParam) return <BizGateway bizId={bizParam} />;
-  return <SmartBookingApp bizId={ORIGINAL_BIZ_ID} />;
+  return <Landing />;
 }
 
 function bootstrap() {
