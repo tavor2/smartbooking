@@ -1,0 +1,2121 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>מערכת קביעת תורים</title>
+<meta name="theme-color" content="#A83E5C" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="לוח תורים חכם" />
+<meta name="description" content="קביעת תורים חכמה" />
+<meta property="og:title" content="מערכת קביעת תורים" />
+<meta property="og:description" content="קביעת תורים חכמה" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="מערכת קביעת תורים" />
+<link rel="manifest" href="./manifest.json" />
+<link rel="icon" href="./icon-32.png" />
+<link rel="apple-touch-icon" href="./icon-180.png" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
+
+<!-- Firebase: shared, real-time storage across every visitor's device -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyArb9Q7WGlUBvjyaQiRyDt7D7G1Dbt9AwY",
+    authDomain: "smartbooking-78d82.firebaseapp.com",
+    projectId: "smartbooking-78d82",
+    storageBucket: "smartbooking-78d82.firebasestorage.app",
+    messagingSenderId: "811077676746",
+    appId: "1:811077676746:web:c5742a1e81e895262b0e33",
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const COLLECTION = "smartbooking";
+
+  // Same interface as before (get/set), plus subscribe() for live updates.
+  window.storage = {
+    get: async (key) => {
+      const snap = await getDoc(doc(db, COLLECTION, key));
+      if (!snap.exists()) throw new Error("not found");
+      return { value: snap.data().value };
+    },
+    set: async (key, value) => {
+      await setDoc(doc(db, COLLECTION, key), { value });
+      return { value };
+    },
+    delete: async (key) => {
+      await deleteDoc(doc(db, COLLECTION, key));
+    },
+    subscribe: (key, cb) => {
+      return onSnapshot(doc(db, COLLECTION, key), (snap) => {
+        cb(snap.exists() ? snap.data().value : null);
+      });
+    },
+  };
+  window.__storageReady = true;
+</script>
+
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Frank+Ruhl+Libre:wght@500;700&family=Heebo:wght@300;400;500;600;700&family=JetBrains+Mono:wght@500&display=swap');
+body { font-family: 'Heebo', sans-serif; margin: 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useMemo, useCallback } = React;
+
+const COLORS = {
+  bg: "#FBF6F4",
+  ink: "#2B1D22",
+  rose: "#A83E5C",
+  roseSoft: "#F0C9D2",
+  sage: "#7C8B66",
+  sageSoft: "#E3E8D9",
+  muted: "#9C8790",
+  line: "#E8DBD9",
+  past: "#D9CFCB",
+  closed: "#6B5568",
+  closedSoft: "#E7DEE7",
+};
+
+const DEFAULT_SETTINGS = {
+  businessStart: 9,
+  businessEnd: 17,
+  maxGap: 120,
+  closures: [],
+  leadTimeStartHour: 9,
+  cancelLimitHours: 48,
+  ownerPhone: "",
+  businessName: "לוח תורים חכם",
+  tagline: "קביעת תורים חכמה",
+  services: [
+    { id: "s1", name: "עיצוב גבות", duration: 20, price: 60 },
+    { id: "s2", name: "פדיקור", duration: 45, price: 130 },
+    { id: "s3", name: "מניקור", duration: 45, price: 110 },
+    { id: "s4", name: "לק ג'ל", duration: 50, price: 140 },
+    { id: "s5", name: "טיפול פנים", duration: 60, price: 220 },
+    { id: "s6", name: "הסרת שיער בשעווה", duration: 30, price: 90 },
+  ],
+};
+
+const STEP = 15;
+const LEAD_TIME_HOURS = 2;
+const APP_VERSION = "2.4.0";
+
+// --- Service worker: offline caching + enables PWA installability.
+// The install prompt itself is only offered on the shared Landing page
+// (bare URL, no ?biz=) — manifest.json's start_url always opens that same
+// landing page regardless of which business page the install happened
+// from, and from there a client/owner routes to "her" business (see
+// ClientBusinessFinder / BusinessLogin). That's what makes one shared
+// install correct for every business instead of pointing at whichever
+// business happened to be open at install time.
+function registerServiceWorker() {
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("./sw.js").catch(() => {});
+  }
+}
+
+function genId() {
+  return Math.random().toString(36).slice(2, 10);
+}
+function toKey(d) {
+  // Local date, not UTC — avoids the date shifting by a day near midnight
+  // depending on timezone (which is what caused today's booking to save
+  // under the wrong day).
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function timeToMin(str) {
+  if (!str) return 0;
+  const [h, m] = str.split(":").map(Number);
+  return h * 60 + (m || 0);
+}
+function hoursUntilAppt(dateStr, startMinutes) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const apptDate = new Date(y, m - 1, d, 0, 0, 0, 0);
+  apptDate.setMinutes(apptDate.getMinutes() + startMinutes);
+  return (apptDate.getTime() - Date.now()) / (1000 * 60 * 60);
+}
+function isValidPhone(p) {
+  return /^\d{10}$/.test((p || "").trim());
+}
+
+// --- Local client session (per device, per business) — lets a client who
+// already logged in once be recognized automatically the next time she
+// opens this business's page, without retyping her phone number.
+function clientSessionKey(bizId) {
+  return `sb_client_session:${bizId}`;
+}
+function getSavedClientSession(bizId) {
+  try {
+    const raw = localStorage.getItem(clientSessionKey(bizId));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+function saveClientSession(bizId, profile) {
+  try {
+    localStorage.setItem(clientSessionKey(bizId), JSON.stringify(profile));
+  } catch {}
+}
+function clearClientSession(bizId) {
+  try {
+    localStorage.removeItem(clientSessionKey(bizId));
+  } catch {}
+}
+function minToTime(m) {
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return `${String(h).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+function getAllowedSlots(existing, duration, startMin, endMin, maxGap) {
+  const res = [];
+  for (let t = startMin; t + duration <= endMin; t += STEP) {
+    const overlap = existing.some((a) => t < a.end && t + duration > a.start);
+    if (overlap) continue;
+    const combined = [...existing, { start: t, end: t + duration }].sort(
+      (a, b) => a.start - b.start
+    );
+    // Anchor the gap check to the window's own opening point (startMin) —
+    // not just gaps between existing appointments — so the *first*
+    // appointment of an empty day can't be booked arbitrarily late and
+    // leave a huge idle stretch before it.
+    let prevEnd = startMin;
+    let ok = true;
+    for (let i = 0; i < combined.length; i++) {
+      if (combined[i].start - prevEnd > maxGap) {
+        ok = false;
+        break;
+      }
+      prevEnd = Math.max(prevEnd, combined[i].end);
+    }
+    if (ok) res.push(t);
+  }
+  return res;
+}
+
+// --- Multi-tenant helpers ---
+// Every business — including what used to be a special-cased "original"
+// business — now goes through the same registration flow and the same
+// namespaced storage keys. (No real users yet, so there was no reason to
+// keep the legacy unprefixed-keys / hardcoded-password special case.)
+const REGISTRY_KEY = "businessRegistry";
+// Super-admin oversight mode (?admin=1) — password isn't stored in plaintext
+// in the source, only its hash. Current password: given to Yaron directly.
+const ADMIN_PASSWORD_HASH = "9da38c3e715e308d49dc54055eaab48be8aac6ed1802c25b972ace3ff52866fb";
+const ADMIN_SESSION_KEY = "sb_admin_auth";
+
+function scopedKey(bizId, base) {
+  return `biz:${bizId}:${base}`;
+}
+
+async function sha256Hex(text) {
+  const enc = new TextEncoder().encode(text);
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function getBusinessRegistry() {
+  try {
+    const res = await window.storage.get(REGISTRY_KEY);
+    return res?.value ? JSON.parse(res.value) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function addToBusinessRegistry(entry) {
+  const list = await getBusinessRegistry();
+  list.push(entry);
+  await window.storage.set(REGISTRY_KEY, JSON.stringify(list));
+  return list;
+}
+
+async function removeFromBusinessRegistry(bizId) {
+  const list = await getBusinessRegistry();
+  const updated = list.filter((b) => b.id !== bizId);
+  await window.storage.set(REGISTRY_KEY, JSON.stringify(updated));
+  return updated;
+}
+
+// Deletes a business's registry entry, auth record, and settings doc. Note:
+// per-day appointment / client documents (biz:<id>:appts:*, biz:<id>:client*)
+// are NOT enumerable through this simple key-value storage layer, so they're
+// left behind as harmless orphaned data rather than deleted one by one.
+async function deleteBusiness(bizId) {
+  await removeFromBusinessRegistry(bizId);
+  try { await window.storage.delete(`business:${bizId}`); } catch {}
+  try { await window.storage.delete(scopedKey(bizId, "settings")); } catch {}
+}
+
+async function getBusinessRecord(bizId) {
+  try {
+    const res = await window.storage.get(`business:${bizId}`);
+    return res?.value ? JSON.parse(res.value) : null;
+  } catch {
+    return null;
+  }
+}
+
+// --- Global reverse index: which businesses is this phone a client of?
+// Lets a client find her way back to "her" salon(s) from the shared landing
+// page, without needing to keep the business-specific link.
+async function getClientBusinessIndex(phone) {
+  try {
+    const res = await window.storage.get(`clientBiz:${phone}`);
+    return res?.value ? JSON.parse(res.value) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function addToClientBusinessIndex(phone, bizId, businessName) {
+  const list = await getClientBusinessIndex(phone);
+  if (list.some((b) => b.id === bizId)) return list;
+  const updated = [...list, { id: bizId, name: businessName }];
+  try {
+    await window.storage.set(`clientBiz:${phone}`, JSON.stringify(updated));
+  } catch {}
+  return updated;
+}
+
+// --- Per-business client registry: powers the owner's client list (add /
+// edit / remove / book-for), separate from clientBiz above which is the
+// reverse index a client uses to find her way back to "her" businesses.
+async function getBizClientRegistry(bizId) {
+  try {
+    const res = await window.storage.get(scopedKey(bizId, "clientRegistry"));
+    return res?.value ? JSON.parse(res.value) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveBizClientRegistry(bizId, list) {
+  await window.storage.set(scopedKey(bizId, "clientRegistry"), JSON.stringify(list));
+  return list;
+}
+
+async function upsertBizClientRegistry(bizId, phone, name) {
+  const list = await getBizClientRegistry(bizId);
+  const idx = list.findIndex((c) => c.phone === phone);
+  if (idx >= 0) list[idx] = { ...list[idx], name };
+  else list.push({ phone, name, createdAt: Date.now() });
+  return saveBizClientRegistry(bizId, list);
+}
+
+async function removeFromBizClientRegistry(bizId, phone) {
+  const list = await getBizClientRegistry(bizId);
+  return saveBizClientRegistry(bizId, list.filter((c) => c.phone !== phone));
+}
+
+function generateDates(n) {
+  const out = [];
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  for (let i = 0; i < n; i++) {
+    const d = new Date(today);
+    d.setDate(d.getDate() + i);
+    out.push({
+      key: toKey(d),
+      weekday: d.toLocaleDateString("he-IL", { weekday: "short" }),
+      day: d.getDate(),
+      month: d.toLocaleDateString("he-IL", { month: "short" }),
+      isToday: i === 0,
+    });
+  }
+  return out;
+}
+
+function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
+  const dates = useMemo(() => generateDates(14), []);
+  const [loading, setLoading] = useState(true);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [mode, setMode] = useState("client");
+  const [selectedDate, setSelectedDate] = useState(dates[0].key);
+  const [appointments, setAppointments] = useState([]);
+  const [apptsLoading, setApptsLoading] = useState(true);
+  const [selectedServiceId, setSelectedServiceId] = useState(null);
+  const [selectedSlot, setSelectedSlot] = useState(null);
+  const [clientName, setClientName] = useState("");
+  const [clientPhone, setClientPhone] = useState("");
+  const [successMsg, setSuccessMsg] = useState("");
+  const [showSettings, setShowSettings] = useState(false);
+  const [confirmCancelId, setConfirmCancelId] = useState(null);
+  const [saveMsg, setSaveMsg] = useState("");
+
+  // --- client identity (login/registration by phone) ---
+  const [loggedInClient, setLoggedInClient] = useState(null); // {name, phone}
+  const [myUpcoming, setMyUpcoming] = useState([]);
+  const [myUpcomingLoading, setMyUpcomingLoading] = useState(false);
+  const [myCancelId, setMyCancelId] = useState(null);
+
+  // --- owner booking on behalf of a client from her client list ---
+  const [bookingForClient, setBookingForClient] = useState(null); // {name, phone} | null
+
+  function startBookingForClient(client) {
+    setBookingForClient(client);
+    setClientName(client.name);
+    setClientPhone(client.phone);
+    setSelectedSlot(null);
+    setSuccessMsg("");
+    setMode("client");
+  }
+
+  function stopBookingForClient() {
+    setBookingForClient(null);
+    setClientName("");
+    setClientPhone("");
+    setSelectedSlot(null);
+    setSuccessMsg("");
+    setMode("owner");
+  }
+
+  // --- owner mode password gate ---
+  const [ownerUnlocked, setOwnerUnlocked] = useState(false);
+  const [showOwnerLogin, setShowOwnerLogin] = useState(false);
+  const [ownerPassInput, setOwnerPassInput] = useState("");
+  const [ownerPassError, setOwnerPassError] = useState("");
+  const [ownerPassChecking, setOwnerPassChecking] = useState(false);
+
+  function requestOwnerMode() {
+    if (ownerUnlocked) {
+      setBookingForClient(null);
+      setMode("owner");
+    } else {
+      setOwnerPassInput("");
+      setOwnerPassError("");
+      setShowOwnerLogin(true);
+    }
+  }
+
+  // --- admin oversight: entering via the admin panel (?adminEnter=1) skips
+  // this business's own owner password, but only if the browser tab already
+  // holds a valid admin session (set after the admin password was verified).
+  const [showOwnerToggle, setShowOwnerToggle] = useState(false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("owner") === "1" || params.get("adminEnter") === "1") {
+      setShowOwnerToggle(true);
+    }
+    if (params.get("adminEnter") === "1" && sessionStorage.getItem(ADMIN_SESSION_KEY) === "1") {
+      setOwnerUnlocked(true);
+      setMode("owner");
+    }
+  }, []);
+
+  async function submitOwnerPassword() {
+    setOwnerPassError("");
+    setOwnerPassChecking(true);
+    try {
+      const biz = await getBusinessRecord(bizId);
+      const hash = await sha256Hex(ownerPassInput);
+      if (biz && hash === biz.passwordHash) {
+        setOwnerUnlocked(true);
+        setShowOwnerLogin(false);
+        setBookingForClient(null);
+        setMode("owner");
+      } else {
+        setOwnerPassError("סיסמה שגויה");
+      }
+    } catch {
+      setOwnerPassError("שגיאה באימות, נסי שוב");
+    }
+    setOwnerPassChecking(false);
+  }
+
+  useEffect(() => {
+    const unsub = window.storage.subscribe(scopedKey(bizId, "settings"), (val) => {
+      if (val) {
+        const parsed = JSON.parse(val);
+        setSettings(parsed);
+        setSelectedServiceId((prev) => prev || parsed.services?.[0]?.id || null);
+      } else {
+        setSettings(DEFAULT_SETTINGS);
+        setSelectedServiceId(DEFAULT_SETTINGS.services[0].id);
+        window.storage.set(scopedKey(bizId, "settings"), JSON.stringify(DEFAULT_SETTINGS)).catch(() => {});
+      }
+      setLoading(false);
+    });
+    return () => unsub && unsub();
+  }, [bizId]);
+
+  useEffect(() => {
+    setApptsLoading(true);
+    setSelectedSlot(null);
+    setSuccessMsg("");
+    const unsub = window.storage.subscribe(scopedKey(bizId, `appts:${selectedDate}`), (val) => {
+      setAppointments(val ? JSON.parse(val) : []);
+      setApptsLoading(false);
+    });
+    return () => unsub && unsub();
+  }, [selectedDate, bizId]);
+
+  useEffect(() => {
+    if (settings.businessName) document.title = settings.businessName;
+  }, [settings.businessName]);
+
+  useEffect(() => {
+    registerServiceWorker();
+  }, []);
+
+  // Auto-login a returning client from this device's saved session, so she
+  // doesn't have to retype her phone number every visit.
+  useEffect(() => {
+    const saved = getSavedClientSession(bizId);
+    if (saved?.phone && saved?.name) {
+      setLoggedInClient(saved);
+      setClientName(saved.name);
+      setClientPhone(saved.phone);
+      refreshMyUpcoming(saved.phone);
+    }
+  }, [bizId]);
+
+  const startMin = settings.businessStart * 60;
+  const endMin = settings.businessEnd * 60;
+  const selectedService =
+    settings.services.find((s) => s.id === selectedServiceId) || settings.services[0];
+  const duration = selectedService?.duration || 30;
+
+  const isToday = selectedDate === dates[0].key;
+  const nowMin = useMemo(() => {
+    const now = new Date();
+    return now.getHours() * 60 + now.getMinutes();
+  }, [selectedDate]);
+  // From leadTimeStartHour onward each day, require booking at least
+  // LEAD_TIME_HOURS ahead of now; before that hour, allow booking from
+  // the very next slot boundary (no extra buffer).
+  const leadTimeStartMin = (settings.leadTimeStartHour ?? 9) * 60;
+  const earliestBookableNow =
+    nowMin >= leadTimeStartMin ? nowMin + LEAD_TIME_HOURS * 60 : nowMin;
+  // round up to the next slot boundary so a slot that's already in progress
+  // isn't offered
+  const effectiveStartMin = isToday
+    ? Math.max(startMin, Math.ceil(earliestBookableNow / STEP) * STEP)
+    : startMin;
+
+  const dayClosures = useMemo(
+    () => (settings.closures || []).filter((c) => c.date === selectedDate),
+    [settings.closures, selectedDate]
+  );
+  const fullDayClosure = dayClosures.find((c) => c.allDay);
+
+  const existingBlocks = useMemo(() => {
+    const apptBlocks = appointments.map((a) => ({ start: a.start, end: a.end }));
+    const closureBlocks = fullDayClosure
+      ? [{ start: startMin, end: endMin }]
+      : dayClosures.map((c) => ({ start: timeToMin(c.startTime), end: timeToMin(c.endTime) }));
+    return [...apptBlocks, ...closureBlocks];
+  }, [appointments, dayClosures, fullDayClosure, startMin, endMin]);
+
+  const allowedSlots = useMemo(
+    () =>
+      selectedService
+        ? getAllowedSlots(existingBlocks, duration, effectiveStartMin, endMin, settings.maxGap)
+        : [],
+    [existingBlocks, duration, effectiveStartMin, endMin, settings.maxGap, selectedService]
+  );
+  const allowedSet = useMemo(() => new Set(allowedSlots), [allowedSlots]);
+
+  const timelineCells = useMemo(() => {
+    const cells = [];
+    for (let t = startMin; t < endMin; t += STEP) {
+      const closedHere =
+        fullDayClosure ||
+        dayClosures.some((c) => !c.allDay && t < timeToMin(c.endTime) && t + STEP > timeToMin(c.startTime));
+      const booked = existingBlocks.some((a) => t < a.end && t + STEP > a.start) && !closedHere;
+      let status = "blocked";
+      if (closedHere) status = "closed";
+      else if (booked) status = "booked";
+      else if (isToday && t < nowMin) status = "past";
+      else if (allowedSet.has(t)) status = "available";
+      cells.push({ t, status });
+    }
+    return cells;
+  }, [startMin, endMin, existingBlocks, allowedSet, isToday, nowMin, dayClosures, fullDayClosure]);
+
+  const morningSlots = allowedSlots.filter((t) => t < 12 * 60);
+  const afternoonSlots = allowedSlots.filter((t) => t >= 12 * 60);
+
+  async function confirmBooking() {
+    if (!clientName.trim() || selectedSlot == null || !isValidPhone(clientPhone)) return;
+    const newAppt = {
+      id: genId(),
+      start: selectedSlot,
+      end: selectedSlot + duration,
+      serviceId: selectedService.id,
+      serviceName: selectedService.name,
+      clientName: clientName.trim(),
+      clientPhone: clientPhone.trim(),
+    };
+    const updated = [...appointments, newAppt];
+    setAppointments(updated);
+    try {
+      await window.storage.set(scopedKey(bizId, `appts:${selectedDate}`), JSON.stringify(updated));
+    } catch {}
+    if (newAppt.clientPhone && isValidPhone(newAppt.clientPhone)) {
+      const list = await getClientAppts(newAppt.clientPhone);
+      const updatedList = [...list, { ...newAppt, date: selectedDate }];
+      try {
+        await window.storage.set(scopedKey(bizId, `clientAppts:${newAppt.clientPhone}`), JSON.stringify(updatedList));
+      } catch {}
+      addToClientBusinessIndex(newAppt.clientPhone, bizId, settings.businessName || DEFAULT_SETTINGS.businessName).catch(() => {});
+      try {
+        await window.storage.set(scopedKey(bizId, `client:${newAppt.clientPhone}`), JSON.stringify({ name: newAppt.clientName, phone: newAppt.clientPhone }));
+      } catch {}
+      upsertBizClientRegistry(bizId, newAppt.clientPhone, newAppt.clientName).catch(() => {});
+      if (loggedInClient?.phone === newAppt.clientPhone) {
+        setMyUpcoming(updatedList.filter((a) => isUpcoming(a)));
+      }
+    }
+    setSuccessMsg(`נקבע לך תור ל${selectedService.name} בשעה ${minToTime(selectedSlot)}`);
+    setSelectedSlot(null);
+    if (!loggedInClient && !bookingForClient) {
+      setClientName("");
+      setClientPhone("");
+    }
+  }
+
+  async function cancelAppointment(id) {
+    const cancelled = appointments.find((a) => a.id === id);
+    const updated = appointments.filter((a) => a.id !== id);
+    setAppointments(updated);
+    setConfirmCancelId(null);
+    try {
+      await window.storage.set(scopedKey(bizId, `appts:${selectedDate}`), JSON.stringify(updated));
+    } catch {}
+    if (cancelled?.clientPhone) {
+      await removeFromClientIndex(cancelled.clientPhone, id);
+    }
+  }
+
+  // --- client identity helpers ---
+  async function getClientAppts(phone) {
+    try {
+      const res = await window.storage.get(scopedKey(bizId, `clientAppts:${phone}`));
+      return res?.value ? JSON.parse(res.value) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function removeFromClientIndex(phone, id) {
+    const list = await getClientAppts(phone);
+    const updated = list.filter((a) => a.id !== id);
+    try {
+      await window.storage.set(scopedKey(bizId, `clientAppts:${phone}`), JSON.stringify(updated));
+    } catch {}
+    if (loggedInClient?.phone === phone) {
+      setMyUpcoming(updated.filter((a) => isUpcoming(a)));
+    }
+  }
+
+  function isUpcoming(a) {
+    const todayKey = dates[0].key;
+    if (a.date > todayKey) return true;
+    if (a.date === todayKey) {
+      const now = new Date();
+      return a.start >= now.getHours() * 60 + now.getMinutes();
+    }
+    return false;
+  }
+
+  async function refreshMyUpcoming(phone) {
+    setMyUpcomingLoading(true);
+    const list = await getClientAppts(phone);
+    setMyUpcoming(list.filter((a) => isUpcoming(a)).sort((a, b) => (a.date + a.start) - (b.date + b.start) || a.date.localeCompare(b.date)));
+    setMyUpcomingLoading(false);
+  }
+
+  async function loginOrRegisterClient(phone, name) {
+    const profile = { name: name.trim(), phone: phone.trim() };
+    try {
+      await window.storage.set(scopedKey(bizId, `client:${phone}`), JSON.stringify(profile));
+    } catch {}
+    addToClientBusinessIndex(phone.trim(), bizId, settings.businessName || DEFAULT_SETTINGS.businessName).catch(() => {});
+    upsertBizClientRegistry(bizId, phone.trim(), name.trim()).catch(() => {});
+    saveClientSession(bizId, profile);
+    setLoggedInClient(profile);
+    setClientName(profile.name);
+    setClientPhone(profile.phone);
+    await refreshMyUpcoming(phone);
+  }
+
+  function logoutClient() {
+    clearClientSession(bizId);
+    setLoggedInClient(null);
+    setMyUpcoming([]);
+    setClientName("");
+    setClientPhone("");
+  }
+
+  async function myCancelAppointment(appt) {
+    // remove from that day's appts list
+    try {
+      const res = await window.storage.get(scopedKey(bizId, `appts:${appt.date}`));
+      const dayList = res?.value ? JSON.parse(res.value) : [];
+      const updatedDay = dayList.filter((a) => a.id !== appt.id);
+      await window.storage.set(scopedKey(bizId, `appts:${appt.date}`), JSON.stringify(updatedDay));
+      if (appt.date === selectedDate) setAppointments(updatedDay);
+    } catch {}
+    await removeFromClientIndex(appt.clientPhone, appt.id);
+    setMyCancelId(null);
+  }
+
+  async function saveSettings(next) {
+    setSettings(next);
+    try {
+      await window.storage.set(scopedKey(bizId, "settings"), JSON.stringify(next));
+      setSaveMsg("ההגדרות נשמרו");
+      setTimeout(() => setSaveMsg(""), 1800);
+    } catch {}
+  }
+
+  function updateService(id, field, value) {
+    const services = settings.services.map((s) =>
+      s.id === id ? { ...s, [field]: field === "name" ? value : Number(value) } : s
+    );
+    saveSettings({ ...settings, services });
+  }
+  function removeService(id) {
+    saveSettings({ ...settings, services: settings.services.filter((s) => s.id !== id) });
+  }
+  function addService() {
+    const services = [...settings.services, { id: genId(), name: "שירות חדש", duration: 30, price: 0 }];
+    saveSettings({ ...settings, services });
+  }
+
+  function addClosure(closure) {
+    const closures = [...(settings.closures || []), { id: genId(), ...closure }];
+    saveSettings({ ...settings, closures });
+  }
+  function removeClosure(id) {
+    saveSettings({ ...settings, closures: (settings.closures || []).filter((c) => c.id !== id) });
+  }
+
+  if (loading) {
+    return (
+      <div style={{ background: COLORS.bg, minHeight: "100vh" }} className="flex items-center justify-center text-[15px]">
+        <span style={{ color: COLORS.muted }}>טוען...</span>
+      </div>
+    );
+  }
+
+  const selectedDateInfo = dates.find((d) => d.key === selectedDate);
+
+  return (
+    <div style={{ background: COLORS.bg, color: COLORS.ink, minHeight: "100vh" }} className="w-full">
+      <div style={{ borderColor: COLORS.line }} className="border-b px-5 py-4 flex items-center justify-between max-w-2xl mx-auto">
+        <div className="flex items-center gap-2">
+          <span style={{ color: COLORS.rose }} className="text-lg leading-none">✦</span>
+          <div>
+            <h1 style={{ fontFamily: "'Frank Ruhl Libre', serif", color: COLORS.ink }} className="text-xl font-bold leading-none">
+              {settings.businessName || DEFAULT_SETTINGS.businessName}
+            </h1>
+            <p style={{ color: COLORS.muted }} className="text-xs mt-1">
+              {settings.tagline || DEFAULT_SETTINGS.tagline}
+            </p>
+          </div>
+        </div>
+        {showOwnerToggle && (
+          <div style={{ background: COLORS.roseSoft }} className="flex rounded-full p-1 text-xs font-medium">
+            <button onClick={() => { setBookingForClient(null); setMode("client"); }}
+              style={{ background: mode === "client" ? COLORS.rose : "transparent", color: mode === "client" ? "white" : COLORS.ink }}
+              className="px-3 py-1.5 rounded-full transition-colors">לקוחה</button>
+            <button onClick={requestOwnerMode}
+              style={{ background: mode === "owner" ? COLORS.rose : "transparent", color: mode === "owner" ? "white" : COLORS.ink }}
+              className="px-3 py-1.5 rounded-full transition-colors">בעלת העסק</button>
+          </div>
+        )}
+      </div>
+
+      <div className="px-5 py-4 space-y-5 max-w-2xl mx-auto">
+        {mode === "client" && (
+          <div>
+            <p style={{ color: COLORS.muted }} className="text-xs mb-2 font-medium">בחרי טיפול</p>
+            <div className="flex flex-wrap gap-2">
+              {settings.services.map((s) => (
+                <button key={s.id} onClick={() => { setSelectedServiceId(s.id); setSelectedSlot(null); }}
+                  style={{ background: selectedServiceId === s.id ? COLORS.rose : "white", color: selectedServiceId === s.id ? "white" : COLORS.ink, borderColor: COLORS.line }}
+                  className="border px-3 py-1.5 rounded-full text-sm transition-colors">
+                  {s.name} · {s.duration} ד׳
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div>
+          <p style={{ color: COLORS.muted }} className="text-xs mb-2 font-medium">בחרי תאריך</p>
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {dates.map((d) => (
+              <button key={d.key} onClick={() => setSelectedDate(d.key)}
+                style={{ background: selectedDate === d.key ? COLORS.ink : "white", color: selectedDate === d.key ? "white" : COLORS.ink, borderColor: COLORS.line }}
+                className="border rounded-xl px-3 py-2 text-center min-w-[52px] shrink-0">
+                <div className="text-[10px] opacity-70">{d.weekday}</div>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace" }} className="text-sm font-medium">{d.day}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <p style={{ color: COLORS.muted }} className="text-xs font-medium">
+              {selectedDateInfo?.weekday}, {selectedDateInfo?.day} {selectedDateInfo?.month} · {settings.businessStart}:00–{settings.businessEnd}:00
+            </p>
+            <div className="flex items-center gap-3 text-[10px]" style={{ color: COLORS.muted }}>
+              <span className="flex items-center gap-1"><span style={{ background: COLORS.rose }} className="w-2 h-2 rounded-full inline-block" />תפוס</span>
+              <span className="flex items-center gap-1"><span style={{ background: COLORS.sage }} className="w-2 h-2 rounded-full inline-block" />פנוי</span>
+              <span className="flex items-center gap-1"><span style={{ background: COLORS.past }} className="w-2 h-2 rounded-full inline-block" />עבר</span>
+              <span className="flex items-center gap-1"><span style={{ background: COLORS.closed }} className="w-2 h-2 rounded-full inline-block" />לא זמינה</span>
+            </div>
+          </div>
+          {apptsLoading ? (
+            <div style={{ color: COLORS.muted }} className="text-xs">טוען לוח...</div>
+          ) : (
+            <div className="flex gap-[2px]">
+              {timelineCells.map((c) => (
+                <div key={c.t} title={`${minToTime(c.t)} · ${c.status === "available" ? "פנוי" : c.status === "past" ? "עבר" : c.status === "closed" ? "לא זמינה" : "תפוס"}`}
+                  style={{ background: c.status === "booked" ? COLORS.rose : c.status === "available" ? COLORS.sage : c.status === "past" ? COLORS.past : c.status === "closed" ? COLORS.closed : COLORS.rose, opacity: c.status === "blocked" ? 0.5 : 1 }}
+                  className="h-6 flex-1 rounded-[2px]" />
+              ))}
+            </div>
+          )}
+          <div className="flex justify-between mt-1 text-[10px]" style={{ color: COLORS.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+            <span>{settings.businessStart}:00</span>
+            <span>{settings.businessEnd}:00</span>
+          </div>
+        </div>
+
+        {mode === "client" ? (
+          <div className="space-y-4">
+            {bookingForClient && (
+              <div style={{ borderColor: COLORS.sage, background: COLORS.sageSoft }} className="border rounded-xl p-3 flex items-center justify-between gap-2">
+                <p className="text-xs">
+                  קובעת תור עבור <span className="font-medium">{bookingForClient.name}</span> · {bookingForClient.phone}
+                </p>
+                <button onClick={stopBookingForClient} style={{ color: COLORS.rose }} className="text-xs font-medium shrink-0 whitespace-nowrap">
+                  חזרה לניהול לקוחות
+                </button>
+              </div>
+            )}
+            {!bookingForClient && (
+              <ClientAuth
+                bizId={bizId}
+                loggedInClient={loggedInClient}
+                loginOrRegisterClient={loginOrRegisterClient}
+                logoutClient={logoutClient}
+                myUpcoming={myUpcoming}
+                myUpcomingLoading={myUpcomingLoading}
+                myCancelId={myCancelId}
+                setMyCancelId={setMyCancelId}
+                myCancelAppointment={myCancelAppointment}
+                cancelLimitHours={settings.cancelLimitHours ?? 48}
+                ownerPhone={settings.ownerPhone}
+              />
+            )}
+            <ClientBooking
+              morningSlots={morningSlots} afternoonSlots={afternoonSlots}
+              selectedSlot={selectedSlot} setSelectedSlot={setSelectedSlot}
+              duration={duration} clientName={clientName} setClientName={setClientName}
+              clientPhone={clientPhone} setClientPhone={setClientPhone}
+              confirmBooking={confirmBooking} successMsg={successMsg} setSuccessMsg={setSuccessMsg}
+              maxGap={settings.maxGap}
+              loggedInClient={loggedInClient}
+              fullDayClosure={fullDayClosure}
+            />
+          </div>
+        ) : (
+          <OwnerView
+            bizId={bizId}
+            appointments={appointments} apptsLoading={apptsLoading}
+            confirmCancelId={confirmCancelId} setConfirmCancelId={setConfirmCancelId}
+            cancelAppointment={cancelAppointment}
+            showSettings={showSettings} setShowSettings={setShowSettings}
+            settings={settings} saveSettings={saveSettings}
+            updateService={updateService} removeService={removeService} addService={addService}
+            addClosure={addClosure} removeClosure={removeClosure}
+            saveMsg={saveMsg}
+            onBookForClient={startBookingForClient}
+          />
+        )}
+      </div>
+
+      <div className="text-center pb-4 space-y-1">
+        <p style={{ color: COLORS.muted }} className="text-[10px]">גרסה {APP_VERSION}</p>
+        <p className="text-[11px]">
+          <a href="?register=1" style={{ color: COLORS.rose }} className="font-medium">🏪 פתיחת עסק חדש באפליקציה</a>
+          <span style={{ color: COLORS.muted }}> · </span>
+          <a href="?login=1" style={{ color: COLORS.muted }}>כניסה לעסק קיים</a>
+        </p>
+      </div>
+
+      {showOwnerLogin && (
+        <div className="fixed inset-0 flex items-center justify-center z-50" style={{ background: "rgba(43,29,34,0.45)" }}>
+          <div style={{ background: "white", borderColor: COLORS.line }} className="border rounded-2xl p-5 w-[90%] max-w-xs space-y-3">
+            <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">כניסת בעלת העסק</p>
+            <input onFocus={(e) => e.target.select()}
+              value={ownerPassInput}
+              onChange={(e) => { setOwnerPassInput(e.target.value); setOwnerPassError(""); }}
+              onKeyDown={(e) => { if (e.key === "Enter") submitOwnerPassword(); }}
+              type="password"
+              autoFocus
+              placeholder="סיסמה"
+              style={{ borderColor: COLORS.line, fontFamily: "'JetBrains Mono', monospace" }}
+              className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 text-center tracking-widest"
+            />
+            {ownerPassError && <p style={{ color: COLORS.rose }} className="text-xs text-center">{ownerPassError}</p>}
+            <div className="flex gap-2">
+              <button onClick={submitOwnerPassword} disabled={ownerPassChecking} style={{ background: COLORS.rose }} className="flex-1 text-white text-sm py-2 rounded-lg font-medium disabled:opacity-60">
+                {ownerPassChecking ? "בודקת..." : "כניסה"}
+              </button>
+              <button onClick={() => setShowOwnerLogin(false)} style={{ borderColor: COLORS.line, color: COLORS.muted }} className="border px-4 py-2 rounded-lg text-sm">
+                ביטול
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient, myUpcoming, myUpcomingLoading, myCancelId, setMyCancelId, myCancelAppointment, cancelLimitHours, ownerPhone }) {
+  const [phone, setPhone] = useState("");
+  const [notFound, setNotFound] = useState(false);
+  const [error, setError] = useState("");
+  const [checking, setChecking] = useState(false);
+
+  async function handleContinue() {
+    setError("");
+    setNotFound(false);
+    if (!isValidPhone(phone)) {
+      setError("מספר טלפון חייב להכיל 10 ספרות");
+      return;
+    }
+    setChecking(true);
+    try {
+      const res = await window.storage.get(scopedKey(bizId, `client:${phone}`));
+      const profile = JSON.parse(res.value);
+      await loginOrRegisterClient(profile.phone, profile.name);
+    } catch {
+      // no existing profile — new clients are registered by the business
+      // owner (or get picked up automatically the first time they book)
+      setNotFound(true);
+    }
+    setChecking(false);
+  }
+
+  if (loggedInClient) {
+    return (
+      <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-medium">שלום, {loggedInClient.name} 👋</p>
+          <button onClick={logoutClient} style={{ color: COLORS.muted }} className="text-xs">החלפת משתמשת</button>
+        </div>
+        {myUpcomingLoading ? (
+          <p style={{ color: COLORS.muted }} className="text-xs">בודקת תורים קיימים...</p>
+        ) : myUpcoming.length > 0 ? (
+          <div className="space-y-2">
+            <p style={{ color: COLORS.muted }} className="text-xs font-medium">התורים העתידיים שלך</p>
+            {myUpcoming.map((a) => {
+              const hoursLeft = hoursUntilAppt(a.date, a.start);
+              const blocked = cancelLimitHours > 0 && hoursLeft < cancelLimitHours;
+              return (
+                <div key={a.id} style={{ borderColor: COLORS.line, background: COLORS.sageSoft }} className="border rounded-xl p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p style={{ fontFamily: "'JetBrains Mono', monospace" }} className="text-sm font-medium">
+                        {a.date} · {minToTime(a.start)}–{minToTime(a.end)}
+                      </p>
+                      <p className="text-sm">{a.serviceName}</p>
+                    </div>
+                    {!blocked && (
+                      myCancelId === a.id ? (
+                        <div className="flex items-center gap-1.5">
+                          <button onClick={() => myCancelAppointment(a)} style={{ background: COLORS.rose }} className="text-white text-xs px-2.5 py-1.5 rounded-lg">אישור ביטול</button>
+                          <button onClick={() => setMyCancelId(null)} style={{ borderColor: COLORS.line }} className="border text-xs px-2.5 py-1.5 rounded-lg">חזרה</button>
+                        </div>
+                      ) : (
+                        <button onClick={() => setMyCancelId(a.id)} style={{ color: COLORS.rose }} className="text-xs font-medium">ביטול / שינוי</button>
+                      )
+                    )}
+                  </div>
+                  {blocked && (
+                    <p style={{ color: COLORS.rose }} className="text-xs">
+                      לא ניתן לבטל תור פחות מ-{cancelLimitHours} שעות מראש דרך המערכת.
+                      {ownerPhone ? (
+                        <> יש להתקשר לבעלת העסק בטלפון <a href={`tel:${ownerPhone}`} className="underline font-medium">{ownerPhone}</a> לביטול.</>
+                      ) : (
+                        <> יש להתקשר לבעלת העסק לביטול התור.</>
+                      )}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+            <p style={{ color: COLORS.muted }} className="text-[11px]">
+              לשינוי תור: בטלי אותו ואז קבעי תור חדש בזמן הרצוי — הפרטים שלך כבר שמורים.
+            </p>
+          </div>
+        ) : (
+          <p style={{ color: COLORS.muted }} className="text-xs">אין לך תורים עתידיים רשומים.</p>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4 space-y-2">
+      <p className="text-sm font-medium">כניסה / הרשמה לפי מספר טלפון</p>
+      <p style={{ color: COLORS.muted }} className="text-xs">
+        אופציונלי — כך לא תצטרכי להזין שוב שם וטלפון, ותוכלי לראות ולנהל תורים קיימים.
+      </p>
+      <div className="flex gap-2">
+        <input onFocus={(e) => e.target.select()} value={phone} onChange={(e) => { setPhone(e.target.value.replace(/\D/g, "").slice(0, 10)); setNotFound(false); setError(""); }}
+          placeholder="מספר נייד (10 ספרות)" type="tel" inputMode="numeric"
+          style={{ borderColor: COLORS.line, fontFamily: "'JetBrains Mono', monospace" }} className="flex-1 border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+      </div>
+      {notFound && (
+        <p style={{ color: COLORS.muted }} className="text-xs">
+          לא מצאנו אותך במערכת. אפשר לקבוע תור כאורחת בטופס שלמטה, או לבקש מבעלת העסק לרשום אותך.
+        </p>
+      )}
+      {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
+      <button onClick={handleContinue} disabled={checking}
+        style={{ background: COLORS.rose }} className="text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-60">
+        {checking ? "בודקת..." : "כניסה"}
+      </button>
+    </div>
+  );
+}
+
+function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelectedSlot, duration, clientName, setClientName, clientPhone, setClientPhone, confirmBooking, successMsg, setSuccessMsg, maxGap, loggedInClient, fullDayClosure }) {
+  if (successMsg) {
+    return (
+      <div style={{ background: COLORS.sageSoft, borderColor: COLORS.sage }} className="border rounded-2xl p-5 text-center">
+        <div style={{ color: COLORS.sage }} className="text-xl mb-1">✓</div>
+        <p className="font-medium">{successMsg}</p>
+        <button onClick={() => setSuccessMsg("")} style={{ background: COLORS.sage }} className="mt-3 text-white text-sm px-4 py-1.5 rounded-full">
+          קביעת תור נוסף
+        </button>
+      </div>
+    );
+  }
+  if (fullDayClosure) {
+    return (
+      <div style={{ background: COLORS.closedSoft, borderColor: COLORS.closed }} className="border rounded-2xl p-5 text-center">
+        <div style={{ color: COLORS.closed }} className="text-xl mb-1">🚫</div>
+        <p className="font-medium">העסק לא פעיל בתאריך הזה</p>
+        {fullDayClosure.reason && <p style={{ color: COLORS.muted }} className="text-sm mt-1">{fullDayClosure.reason}</p>}
+        <p style={{ color: COLORS.muted }} className="text-xs mt-1">נסי לבחור תאריך אחר.</p>
+      </div>
+    );
+  }
+  const noSlots = morningSlots.length === 0 && afternoonSlots.length === 0;
+  return (
+    <div className="space-y-4">
+      {noSlots ? (
+        <div style={{ color: COLORS.muted, borderColor: COLORS.line }} className="border rounded-xl p-4 text-sm text-center">
+          אין תורים פנויים בתאריך הזה שעומדים בכלל ה-{maxGap} דקות. נסי לבחור תאריך אחר.
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {morningSlots.length > 0 && <SlotGroup label="בוקר" slots={morningSlots} selectedSlot={selectedSlot} onSelect={setSelectedSlot} />}
+          {afternoonSlots.length > 0 && <SlotGroup label="צהריים / אחה״צ" slots={afternoonSlots} selectedSlot={selectedSlot} onSelect={setSelectedSlot} />}
+        </div>
+      )}
+      {selectedSlot != null && (
+        <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4 space-y-3">
+          <p className="text-sm font-medium">
+            תור נבחר: {minToTime(selectedSlot)}–{minToTime(selectedSlot + duration)}
+          </p>
+          {loggedInClient ? (
+            <div style={{ background: COLORS.sageSoft }} className="rounded-lg px-3 py-2 text-sm">
+              קובעת עבור: <span className="font-medium">{loggedInClient.name}</span> · {loggedInClient.phone}
+            </div>
+          ) : (
+            <>
+              <input onFocus={(e) => e.target.select()} value={clientName} onChange={(e) => setClientName(e.target.value)} placeholder="שם מלא"
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+              <input onFocus={(e) => e.target.select()} value={clientPhone} onChange={(e) => setClientPhone(e.target.value.replace(/\D/g, "").slice(0, 10))} placeholder="טלפון (10 ספרות)" type="tel" inputMode="numeric"
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+              {clientPhone && !isValidPhone(clientPhone) && (
+                <p style={{ color: COLORS.rose }} className="text-xs">מספר טלפון חייב להכיל 10 ספרות</p>
+              )}
+            </>
+          )}
+          <div className="flex gap-2">
+            <button onClick={confirmBooking} disabled={!clientName.trim() || !isValidPhone(clientPhone)}
+              style={{ background: clientName.trim() && isValidPhone(clientPhone) ? COLORS.rose : COLORS.muted }}
+              className="flex-1 text-white text-sm py-2 rounded-lg font-medium disabled:opacity-60">
+              אישור קביעת תור
+            </button>
+            <button onClick={() => setSelectedSlot(null)} style={{ borderColor: COLORS.line, color: COLORS.muted }} className="border px-4 py-2 rounded-lg text-sm">
+              ביטול
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SlotGroup({ label, slots, selectedSlot, onSelect }) {
+  return (
+    <div>
+      <p style={{ color: COLORS.muted }} className="text-xs mb-1.5">{label}</p>
+      <div className="flex flex-wrap gap-2">
+        {slots.map((t) => (
+          <button key={t} onClick={() => onSelect(t)}
+            style={{ background: selectedSlot === t ? COLORS.rose : COLORS.sageSoft, color: selectedSlot === t ? "white" : COLORS.ink, fontFamily: "'JetBrains Mono', monospace" }}
+            className="px-3 py-1.5 rounded-lg text-sm">
+            {minToTime(t)}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConfirmCancelId, cancelAppointment, showSettings, setShowSettings, settings, saveSettings, updateService, removeService, addService, addClosure, removeClosure, saveMsg, onBookForClient }) {
+  const [showClients, setShowClients] = useState(false);
+  const sorted = [...appointments].sort((a, b) => a.start - b.start);
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <p style={{ color: COLORS.muted }} className="text-xs font-medium">{sorted.length} תורים ביום זה</p>
+        <div className="flex items-center gap-3">
+          <button onClick={() => setShowClients((v) => !v)} style={{ color: COLORS.rose }} className="text-xs font-medium">
+            👥 לקוחות
+          </button>
+          <button onClick={() => setShowSettings((v) => !v)} style={{ color: COLORS.rose }} className="text-xs font-medium">
+            ⚙ הגדרות
+          </button>
+        </div>
+      </div>
+
+      {!apptsLoading && sorted.length === 0 && (
+        <div style={{ color: COLORS.muted, borderColor: COLORS.line }} className="border rounded-xl p-4 text-sm text-center">
+          אין עדיין תורים ליום הזה.
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {sorted.map((a) => (
+          <div key={a.id} style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-xl p-3 flex items-center justify-between">
+            <div>
+              <p style={{ fontFamily: "'JetBrains Mono', monospace" }} className="text-sm font-medium">{minToTime(a.start)}–{minToTime(a.end)}</p>
+              <p className="text-sm">{a.serviceName}</p>
+              <p style={{ color: COLORS.muted }} className="text-xs">{a.clientName} {a.clientPhone && `· ${a.clientPhone}`}</p>
+            </div>
+            {confirmCancelId === a.id ? (
+              <div className="flex items-center gap-1.5">
+                <button onClick={() => cancelAppointment(a.id)} style={{ background: COLORS.rose }} className="text-white text-xs px-2.5 py-1.5 rounded-lg">לבטל תור</button>
+                <button onClick={() => setConfirmCancelId(null)} style={{ borderColor: COLORS.line }} className="border text-xs px-2.5 py-1.5 rounded-lg">חזרה</button>
+              </div>
+            ) : (
+              <button onClick={() => setConfirmCancelId(a.id)} style={{ color: COLORS.muted }}>✕</button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {showClients && (
+        <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4">
+          <p style={{ color: COLORS.muted }} className="text-xs font-medium mb-2">ניהול לקוחות</p>
+          <ClientsManager bizId={bizId} businessName={settings.businessName} onBookForClient={onBookForClient} />
+        </div>
+      )}
+
+      {showSettings && (
+        <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4 space-y-4">
+          <div className="space-y-2">
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-xs block mb-1">שם העסק (כותרת ראשית)</label>
+              <input onFocus={(e) => e.target.select()} value={settings.businessName ?? ""} placeholder="לוח תורים חכם"
+                onChange={(e) => saveSettings({ ...settings, businessName: e.target.value })}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            </div>
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-xs block mb-1">כותרת משנה</label>
+              <input onFocus={(e) => e.target.select()} value={settings.tagline ?? ""} placeholder="קביעת תורים חכמה"
+                onChange={(e) => saveSettings({ ...settings, tagline: e.target.value })}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-xs block mb-1">שעת פתיחה</label>
+              <select value={settings.businessStart} onChange={(e) => saveSettings({ ...settings, businessStart: Number(e.target.value) })}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm">
+                {Array.from({ length: 15 }, (_, i) => i + 6).map((h) => <option key={h} value={h}>{h}:00</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-xs block mb-1">שעת סגירה</label>
+              <select value={settings.businessEnd} onChange={(e) => saveSettings({ ...settings, businessEnd: Number(e.target.value) })}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm">
+                {Array.from({ length: 15 }, (_, i) => i + 6).map((h) => <option key={h} value={h}>{h}:00</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-xs block mb-1">מרווח מקס׳ (ד׳)</label>
+              <input onFocus={(e) => e.target.select()} type="number" min={15} step={15} value={settings.maxGap}
+                onChange={(e) => saveSettings({ ...settings, maxGap: Number(e.target.value) })}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            </div>
+          </div>
+
+          <div>
+            <label style={{ color: COLORS.muted }} className="text-xs block mb-1">
+              משעה — נדרשות {LEAD_TIME_HOURS} שעות מראש להזמנת תור לאותו יום
+            </label>
+            <select value={settings.leadTimeStartHour ?? 9} onChange={(e) => saveSettings({ ...settings, leadTimeStartHour: Number(e.target.value) })}
+              style={{ borderColor: COLORS.line }} className="w-40 border rounded-lg px-2 py-1.5 text-sm">
+              {Array.from({ length: 24 }, (_, i) => i).map((h) => <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>)}
+            </select>
+            <p style={{ color: COLORS.muted }} className="text-[11px] mt-1">
+              לפני השעה הזו ביום, לקוחה יכולה לקבוע תור לסמוך יותר. מהשעה הזו ואילך, כל תור חדש לאותו יום חייב להיות לפחות {LEAD_TIME_HOURS} שעות קדימה.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-xs block mb-1">הגבלת ביטול (שעות מראש)</label>
+              <input onFocus={(e) => e.target.select()} type="number" min={0} step={1} value={settings.cancelLimitHours ?? 48}
+                onChange={(e) => saveSettings({ ...settings, cancelLimitHours: Number(e.target.value) })}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            </div>
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-xs block mb-1">טלפון לביטול ידני</label>
+              <input onFocus={(e) => e.target.select()} type="tel" value={settings.ownerPhone || ""} placeholder="050-0000000"
+                onChange={(e) => saveSettings({ ...settings, ownerPhone: e.target.value })}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            </div>
+          </div>
+          <p style={{ color: COLORS.muted }} className="text-[11px] -mt-2">
+            לקוחה לא תוכל לבטל תור עצמאית פחות מ-{settings.cancelLimitHours ?? 48} שעות לפני מועדו, ותופנה להתקשר למספר שהוזן. 0 = ללא הגבלה.
+          </p>
+
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <p style={{ color: COLORS.muted }} className="text-xs font-medium">טיפולים</p>
+              <button onClick={addService} style={{ color: COLORS.rose }} className="text-xs">+ הוספה</button>
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 px-0.5">
+                <p style={{ color: COLORS.muted }} className="flex-1 text-[10px]">שם הטיפול</p>
+                <p style={{ color: COLORS.muted }} className="w-16 text-[10px] text-center">דקות</p>
+                <p style={{ color: COLORS.muted }} className="w-16 text-[10px] text-center">₪ מחיר</p>
+                <span className="w-[18px]" />
+              </div>
+              {settings.services.map((s) => (
+                <div key={s.id} className="flex items-center gap-2">
+                  <input onFocus={(e) => e.target.select()} value={s.name} onChange={(e) => updateService(s.id, "name", e.target.value)}
+                    style={{ borderColor: COLORS.line }} className="flex-1 border rounded-lg px-2 py-1.5 text-sm min-w-0" />
+                  <input onFocus={(e) => e.target.select()} type="number" value={s.duration} onChange={(e) => updateService(s.id, "duration", e.target.value)}
+                    style={{ borderColor: COLORS.line }} className="w-16 border rounded-lg px-2 py-1.5 text-sm text-center" title="דקות" />
+                  <input onFocus={(e) => e.target.select()} type="number" value={s.price} onChange={(e) => updateService(s.id, "price", e.target.value)}
+                    style={{ borderColor: COLORS.line }} className="w-16 border rounded-lg px-2 py-1.5 text-sm text-center" title="מחיר בשקלים" />
+                  <button onClick={() => removeService(s.id)} style={{ color: COLORS.muted }}>🗑</button>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div>
+            <p style={{ color: COLORS.muted }} className="text-xs font-medium mb-2">ימים / שעות לא זמינים (חופשה, מחלה, אירוע)</p>
+            <ClosuresManager closures={settings.closures || []} addClosure={addClosure} removeClosure={removeClosure} />
+          </div>
+          <div>
+            <p style={{ color: COLORS.muted }} className="text-xs font-medium mb-2">שינוי סיסמה</p>
+            <ChangePassword bizId={bizId} />
+          </div>
+          {saveMsg && <p style={{ color: COLORS.sage }} className="text-xs">{saveMsg}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClientsManager({ bizId, businessName, onBookForClient }) {
+  const [clients, setClients] = useState(null); // null = loading
+  const [newName, setNewName] = useState("");
+  const [newPhone, setNewPhone] = useState("");
+  const [addError, setAddError] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [editingPhone, setEditingPhone] = useState(null);
+  const [editName, setEditName] = useState("");
+  const [confirmDeletePhone, setConfirmDeletePhone] = useState(null);
+
+  async function load() {
+    const list = await getBizClientRegistry(bizId);
+    setClients([...list].sort((a, b) => (a.name || "").localeCompare(b.name || "", "he")));
+  }
+
+  useEffect(() => { load(); }, [bizId]);
+
+  async function handleAdd() {
+    setAddError("");
+    if (!newName.trim()) return setAddError("נא להזין שם");
+    if (!isValidPhone(newPhone)) return setAddError("מספר טלפון חייב להכיל 10 ספרות");
+    setAdding(true);
+    try {
+      const phone = newPhone.trim();
+      await window.storage.set(scopedKey(bizId, `client:${phone}`), JSON.stringify({ name: newName.trim(), phone }));
+      addToClientBusinessIndex(phone, bizId, businessName || DEFAULT_SETTINGS.businessName).catch(() => {});
+      await upsertBizClientRegistry(bizId, phone, newName.trim());
+      setNewName("");
+      setNewPhone("");
+      await load();
+    } catch {
+      setAddError("קרתה תקלה, נסי שוב");
+    }
+    setAdding(false);
+  }
+
+  async function handleSaveEdit(phone) {
+    if (!editName.trim()) return;
+    try {
+      await window.storage.set(scopedKey(bizId, `client:${phone}`), JSON.stringify({ name: editName.trim(), phone }));
+      await upsertBizClientRegistry(bizId, phone, editName.trim());
+    } catch {}
+    setEditingPhone(null);
+    await load();
+  }
+
+  // Removes the client from the owner's list and login lookup. Her past /
+  // existing appointment records are left untouched — same "orphan rather
+  // than cascade-delete" approach used elsewhere in the app.
+  async function handleDelete(phone) {
+    try {
+      await window.storage.delete(scopedKey(bizId, `client:${phone}`));
+    } catch {}
+    await removeFromBizClientRegistry(bizId, phone);
+    setConfirmDeletePhone(null);
+    await load();
+  }
+
+  return (
+    <div className="space-y-3">
+      <div style={{ borderColor: COLORS.line }} className="border rounded-xl p-3 space-y-2">
+        <p style={{ color: COLORS.muted }} className="text-xs font-medium">הוספת לקוחה</p>
+        <div className="grid grid-cols-2 gap-2">
+          <input onFocus={(e) => e.target.select()} value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="שם מלא"
+            style={{ borderColor: COLORS.line }} className="border rounded-lg px-2 py-1.5 text-sm" />
+          <input onFocus={(e) => e.target.select()} value={newPhone} onChange={(e) => setNewPhone(e.target.value.replace(/\D/g, "").slice(0, 10))} placeholder="טלפון" type="tel" inputMode="numeric"
+            style={{ borderColor: COLORS.line, fontFamily: "'JetBrains Mono', monospace" }} className="border rounded-lg px-2 py-1.5 text-sm" />
+        </div>
+        {addError && <p style={{ color: COLORS.rose }} className="text-xs">{addError}</p>}
+        <button onClick={handleAdd} disabled={adding} style={{ background: COLORS.rose }} className="text-white text-xs px-3 py-1.5 rounded-lg font-medium disabled:opacity-60">
+          {adding ? "מוסיפה..." : "+ הוספת לקוחה"}
+        </button>
+      </div>
+
+      {clients === null ? (
+        <p style={{ color: COLORS.muted }} className="text-xs">טוענת...</p>
+      ) : clients.length === 0 ? (
+        <p style={{ color: COLORS.muted }} className="text-xs">אין עדיין לקוחות רשומות.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {clients.map((c) => (
+            <div key={c.phone} style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-lg p-2.5 space-y-1.5">
+              {editingPhone === c.phone ? (
+                <div className="flex items-center gap-1.5">
+                  <input onFocus={(e) => e.target.select()} value={editName} onChange={(e) => setEditName(e.target.value)} autoFocus
+                    onKeyDown={(e) => { if (e.key === "Enter") handleSaveEdit(c.phone); }}
+                    style={{ borderColor: COLORS.line }} className="flex-1 border rounded-lg px-2 py-1 text-sm min-w-0" />
+                  <button onClick={() => handleSaveEdit(c.phone)} style={{ color: COLORS.sage }} className="text-xs font-medium shrink-0">שמירה</button>
+                  <button onClick={() => setEditingPhone(null)} style={{ color: COLORS.muted }} className="text-xs shrink-0">ביטול</button>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium truncate">{c.name}</p>
+                    <p style={{ color: COLORS.muted, fontFamily: "'JetBrains Mono', monospace" }} className="text-xs" dir="ltr">{c.phone}</p>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button onClick={() => onBookForClient(c)} style={{ background: COLORS.sage }} className="text-white text-xs px-2 py-1.5 rounded-lg whitespace-nowrap">
+                      📅 קביעת תור
+                    </button>
+                    <button onClick={() => { setEditingPhone(c.phone); setEditName(c.name); }} style={{ color: COLORS.muted }} className="text-xs px-1">✎</button>
+                  </div>
+                </div>
+              )}
+              {editingPhone !== c.phone && (
+                confirmDeletePhone === c.phone ? (
+                  <div style={{ borderColor: COLORS.line }} className="border-t pt-1.5 flex items-center justify-between gap-2">
+                    <p style={{ color: COLORS.rose }} className="text-xs">להסיר את הלקוחה מהרשימה?</p>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button onClick={() => handleDelete(c.phone)} style={{ background: COLORS.rose }} className="text-white text-xs px-2.5 py-1 rounded-lg">הסרה</button>
+                      <button onClick={() => setConfirmDeletePhone(null)} style={{ borderColor: COLORS.line }} className="border text-xs px-2.5 py-1 rounded-lg">ביטול</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button onClick={() => setConfirmDeletePhone(c.phone)} style={{ color: COLORS.muted }} className="text-[11px]">🗑 הסרת לקוחה</button>
+                )
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChangePassword({ bizId }) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function handleChange() {
+    setError("");
+    setSuccess("");
+    if (!currentPassword) return setError("נא להזין את הסיסמה הנוכחית");
+    if (newPassword.length < 4) return setError("הסיסמה החדשה חייבת להכיל לפחות 4 תווים");
+    if (newPassword !== confirmPassword) return setError("הסיסמאות החדשות אינן תואמות");
+    setSaving(true);
+    try {
+      const biz = await getBusinessRecord(bizId);
+      const currentHash = await sha256Hex(currentPassword);
+      if (!biz || currentHash !== biz.passwordHash) {
+        setError("הסיסמה הנוכחית שגויה");
+        setSaving(false);
+        return;
+      }
+      const newHash = await sha256Hex(newPassword);
+      await window.storage.set(`business:${bizId}`, JSON.stringify({ ...biz, passwordHash: newHash }));
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setSuccess("הסיסמה עודכנה בהצלחה");
+      setTimeout(() => setSuccess(""), 2500);
+    } catch {
+      setError("קרתה תקלה, נסי שוב");
+    }
+    setSaving(false);
+  }
+
+  return (
+    <div style={{ borderColor: COLORS.line }} className="border rounded-xl p-3 space-y-2">
+      <input onFocus={(e) => e.target.select()} value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} placeholder="סיסמה נוכחית" type="password"
+        style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+      <input onFocus={(e) => e.target.select()} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="סיסמה חדשה" type="password"
+        style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+      <input onFocus={(e) => e.target.select()} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="אימות סיסמה חדשה" type="password"
+        onKeyDown={(e) => { if (e.key === "Enter") handleChange(); }}
+        style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+      {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
+      {success && <p style={{ color: COLORS.sage }} className="text-xs">{success}</p>}
+      <button onClick={handleChange} disabled={saving} style={{ background: COLORS.rose }} className="text-white text-xs px-3 py-1.5 rounded-lg font-medium disabled:opacity-60">
+        {saving ? "מעדכנת..." : "עדכון סיסמה"}
+      </button>
+    </div>
+  );
+}
+
+function ClosuresManager({ closures, addClosure, removeClosure }) {
+  const [date, setDate] = useState("");
+  const [allDay, setAllDay] = useState(true);
+  const [startTime, setStartTime] = useState("09:00");
+  const [endTime, setEndTime] = useState("17:00");
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState("");
+
+  const todayStr = toKey(new Date());
+  const sorted = [...closures].sort((a, b) => a.date.localeCompare(b.date));
+
+  function handleAdd() {
+    setError("");
+    if (!date) {
+      setError("נא לבחור תאריך");
+      return;
+    }
+    if (!allDay && timeToMin(startTime) >= timeToMin(endTime)) {
+      setError("שעת הסיום חייבת להיות אחרי שעת ההתחלה");
+      return;
+    }
+    addClosure({
+      date,
+      allDay,
+      startTime: allDay ? null : startTime,
+      endTime: allDay ? null : endTime,
+      reason: reason.trim(),
+    });
+    setDate("");
+    setReason("");
+    setAllDay(true);
+  }
+
+  return (
+    <div className="space-y-3">
+      <div style={{ borderColor: COLORS.line }} className="border rounded-xl p-3 space-y-2">
+        <div className="grid grid-cols-2 gap-2">
+          <input onFocus={(e) => e.target.select()} type="date" min={todayStr} value={date} onChange={(e) => setDate(e.target.value)}
+            style={{ borderColor: COLORS.line }} className="border rounded-lg px-2 py-1.5 text-sm" />
+          <label className="flex items-center gap-1.5 text-sm">
+            <input onFocus={(e) => e.target.select()} type="checkbox" checked={allDay} onChange={(e) => setAllDay(e.target.checked)} />
+            כל היום
+          </label>
+        </div>
+        {!allDay && (
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-[10px] block mb-0.5">משעה</label>
+              <input onFocus={(e) => e.target.select()} type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            </div>
+            <div>
+              <label style={{ color: COLORS.muted }} className="text-[10px] block mb-0.5">עד שעה</label>
+              <input onFocus={(e) => e.target.select()} type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)}
+                style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            </div>
+          </div>
+        )}
+        <input onFocus={(e) => e.target.select()} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="סיבה (חופשה, מחלה, אירוע...) — אופציונלי"
+          style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+        {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
+        <button onClick={handleAdd} style={{ background: COLORS.closed }} className="text-white text-xs px-3 py-1.5 rounded-lg font-medium">
+          + סימון כלא זמינה
+        </button>
+      </div>
+
+      {sorted.length > 0 && (
+        <div className="space-y-1.5">
+          {sorted.map((c) => (
+            <div key={c.id} style={{ borderColor: COLORS.line, background: COLORS.closedSoft }} className="border rounded-lg px-3 py-2 flex items-center justify-between">
+              <div className="text-xs">
+                <span style={{ fontFamily: "'JetBrains Mono', monospace" }} className="font-medium">{c.date}</span>
+                {" · "}
+                {c.allDay ? "כל היום" : `${c.startTime}–${c.endTime}`}
+                {c.reason && <span style={{ color: COLORS.muted }}> · {c.reason}</span>}
+              </div>
+              <button onClick={() => removeClosure(c.id)} style={{ color: COLORS.muted }}>🗑</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CenteredScreen({ children }) {
+  return (
+    <div style={{ background: COLORS.bg, minHeight: "100vh" }} className="flex items-center justify-center px-5">
+      <div style={{ background: "white", borderColor: COLORS.line }} className="border rounded-2xl p-6 w-full max-w-sm space-y-4">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function goTo(href) {
+  window.location.href = href;
+}
+
+// --- Business registration: any owner can spin up her own booking page ---
+function BusinessRegister() {
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [created, setCreated] = useState(null); // { id, link }
+
+  async function handleSubmit() {
+    setError("");
+    if (!name.trim()) return setError("נא להזין שם עסק");
+    if (!isValidPhone(phone)) return setError("מספר טלפון חייב להכיל 10 ספרות");
+    if (password.length < 4) return setError("הסיסמה חייבת להכיל לפחות 4 תווים");
+    if (password !== confirmPassword) return setError("הסיסמאות אינן תואמות");
+
+    setSubmitting(true);
+    try {
+      const id = genId();
+      const passwordHash = await sha256Hex(password);
+      const newSettings = { ...DEFAULT_SETTINGS, businessName: name.trim(), ownerPhone: phone.trim() };
+      await window.storage.set(`business:${id}`, JSON.stringify({
+        id, businessName: name.trim(), ownerPhone: phone.trim(), passwordHash, createdAt: Date.now(),
+      }));
+      await window.storage.set(scopedKey(id, "settings"), JSON.stringify(newSettings));
+      await addToBusinessRegistry({ id, name: name.trim(), phone: phone.trim() });
+      const link = `${window.location.origin}${window.location.pathname}?biz=${id}`;
+      setCreated({ id, link });
+    } catch {
+      setError("קרתה תקלה ביצירת העסק, נסי שוב");
+    }
+    setSubmitting(false);
+  }
+
+  if (created) {
+    return (
+      <CenteredScreen>
+        <div style={{ color: COLORS.sage }} className="text-2xl text-center">✓</div>
+        <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">העסק נוצר בהצלחה!</p>
+        <p style={{ color: COLORS.muted }} className="text-sm text-center">
+          זה הקישור של העסק שלך — שלחי אותו ללקוחות שלך כדי שיוכלו לקבוע תור ישירות אצלך.
+        </p>
+        <div style={{ borderColor: COLORS.line, background: COLORS.bg }} className="border rounded-lg p-3 text-xs break-all" dir="ltr">
+          {created.link}
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={() => navigator.clipboard?.writeText(created.link).catch(() => {})}
+            style={{ borderColor: COLORS.line, color: COLORS.ink }}
+            className="border flex-1 py-2 rounded-lg text-sm font-medium">
+            העתקת קישור
+          </button>
+          <button onClick={() => goTo(`${created.link}&owner=1`)} style={{ background: COLORS.rose }} className="flex-1 text-white py-2 rounded-lg text-sm font-medium">
+            כניסה לעסק שלי
+          </button>
+        </div>
+      </CenteredScreen>
+    );
+  }
+
+  return (
+    <CenteredScreen>
+      <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">פתיחת עסק חדש</p>
+      <p style={{ color: COLORS.muted }} className="text-xs text-center">
+        תוך דקה יהיה לך לוח תורים משלך, עם קישור אישי לשליחה ללקוחות.
+      </p>
+      <div className="space-y-2">
+        <input onFocus={(e) => e.target.select()} value={name} onChange={(e) => setName(e.target.value)} placeholder="שם העסק"
+          style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+        <input onFocus={(e) => e.target.select()} value={phone} onChange={(e) => setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))} placeholder="טלפון (10 ספרות)" type="tel" inputMode="numeric"
+          style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+        <input onFocus={(e) => e.target.select()} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="סיסמה (לתפריט בעלת העסק)" type="password"
+          style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+        <input onFocus={(e) => e.target.select()} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="אימות סיסמה" type="password"
+          style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+      </div>
+      {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
+      <button onClick={handleSubmit} disabled={submitting} style={{ background: COLORS.rose }} className="w-full text-white py-2 rounded-lg text-sm font-medium disabled:opacity-60">
+        {submitting ? "יוצרת..." : "יצירת העסק"}
+      </button>
+      <p className="text-center text-xs">
+        <a href="?login=1" style={{ color: COLORS.muted }}>יש לך כבר עסק? כניסה לפי טלפון</a>
+      </p>
+      <p className="text-center text-xs">
+        <a href="./" style={{ color: COLORS.muted }}>ביטול</a>
+      </p>
+    </CenteredScreen>
+  );
+}
+
+// --- Business login: for an owner who lost her link, find it by phone + password ---
+function BusinessLogin() {
+  const [phone, setPhone] = useState("");
+  const [matches, setMatches] = useState(null); // list of {id, name, phone}
+  const [selected, setSelected] = useState(null);
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [checking, setChecking] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+
+  async function handleFind() {
+    setError("");
+    if (!isValidPhone(phone)) return setError("מספר טלפון חייב להכיל 10 ספרות");
+    setChecking(true);
+    const registry = await getBusinessRegistry();
+    const found = registry.filter((b) => b.phone === phone);
+    setChecking(false);
+    if (found.length === 0) {
+      setError("לא נמצא עסק עם מספר הטלפון הזה");
+      return;
+    }
+    setMatches(found);
+    if (found.length === 1) setSelected(found[0]);
+  }
+
+  async function handleLogin() {
+    setError("");
+    if (!selected) return;
+    setChecking(true);
+    try {
+      const biz = await getBusinessRecord(selected.id);
+      const hash = await sha256Hex(password);
+      if (biz && hash === biz.passwordHash) {
+        goTo(`${window.location.origin}${window.location.pathname}?biz=${selected.id}&owner=1`);
+        return;
+      }
+      setError("סיסמה שגויה");
+    } catch {
+      setError("קרתה תקלה, נסי שוב");
+    }
+    setChecking(false);
+  }
+
+  async function handleResetPassword() {
+    setError("");
+    if (!selected) return;
+    if (newPassword.length < 4) return setError("הסיסמה חייבת להכיל לפחות 4 תווים");
+    if (newPassword !== confirmNewPassword) return setError("הסיסמאות אינן תואמות");
+    setChecking(true);
+    try {
+      const biz = await getBusinessRecord(selected.id);
+      const passwordHash = await sha256Hex(newPassword);
+      await window.storage.set(`business:${selected.id}`, JSON.stringify({ ...(biz || {}), id: selected.id, passwordHash }));
+      goTo(`${window.location.origin}${window.location.pathname}?biz=${selected.id}&owner=1`);
+      return;
+    } catch {
+      setError("קרתה תקלה, נסי שוב");
+    }
+    setChecking(false);
+  }
+
+  if (matches && selected && resetting) {
+    return (
+      <CenteredScreen>
+        <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">איפוס סיסמה ל{selected.name}</p>
+        <p style={{ color: COLORS.muted }} className="text-xs text-center">
+          מכיוון שאימתת את מספר הטלפון של העסק, אפשר להגדיר סיסמה חדשה מיד.
+        </p>
+        <input onFocus={(e) => e.target.select()} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="סיסמה חדשה" type="password" autoFocus
+          style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+        <input onFocus={(e) => e.target.select()} value={confirmNewPassword} onChange={(e) => setConfirmNewPassword(e.target.value)} placeholder="אימות סיסמה חדשה" type="password"
+          onKeyDown={(e) => { if (e.key === "Enter") handleResetPassword(); }}
+          style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+        {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
+        <button onClick={handleResetPassword} disabled={checking} style={{ background: COLORS.rose }} className="w-full text-white py-2 rounded-lg text-sm font-medium disabled:opacity-60">
+          {checking ? "מעדכנת..." : "עדכון סיסמה וכניסה"}
+        </button>
+        <button onClick={() => { setResetting(false); setError(""); }} style={{ color: COLORS.muted }} className="w-full text-xs">חזרה</button>
+      </CenteredScreen>
+    );
+  }
+
+  if (matches && selected) {
+    return (
+      <CenteredScreen>
+        <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">כניסה ל{selected.name}</p>
+        <input onFocus={(e) => e.target.select()} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="סיסמה"
+          onKeyDown={(e) => { if (e.key === "Enter") handleLogin(); }}
+          type="password" autoFocus
+          style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+        {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
+        <button onClick={handleLogin} disabled={checking} style={{ background: COLORS.rose }} className="w-full text-white py-2 rounded-lg text-sm font-medium disabled:opacity-60">
+          {checking ? "בודקת..." : "כניסה"}
+        </button>
+        <button onClick={() => { setResetting(true); setError(""); setNewPassword(""); setConfirmNewPassword(""); }} style={{ color: COLORS.muted }} className="w-full text-xs">
+          שכחת את הסיסמה? איפוס לפי מספר הטלפון
+        </button>
+        {matches.length > 1 && (
+          <button onClick={() => setSelected(null)} style={{ color: COLORS.muted }} className="w-full text-xs">בחירת עסק אחר</button>
+        )}
+      </CenteredScreen>
+    );
+  }
+
+  if (matches && matches.length > 1) {
+    return (
+      <CenteredScreen>
+        <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">נמצאו כמה עסקים</p>
+        <div className="space-y-2">
+          {matches.map((b) => (
+            <button key={b.id} onClick={() => setSelected(b)} style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm text-right">
+              {b.name}
+            </button>
+          ))}
+        </div>
+      </CenteredScreen>
+    );
+  }
+
+  return (
+    <CenteredScreen>
+      <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">כניסה לעסק קיים</p>
+      <p style={{ color: COLORS.muted }} className="text-xs text-center">שכחת את הקישור לעסק שלך? נאתר אותו לפי מספר הטלפון.</p>
+      <input onFocus={(e) => e.target.select()} value={phone} onChange={(e) => { setPhone(e.target.value.replace(/\D/g, "").slice(0, 10)); setError(""); }}
+        placeholder="טלפון (10 ספרות)" type="tel" inputMode="numeric"
+        onKeyDown={(e) => { if (e.key === "Enter") handleFind(); }}
+        style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+      {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
+      <button onClick={handleFind} disabled={checking} style={{ background: COLORS.rose }} className="w-full text-white py-2 rounded-lg text-sm font-medium disabled:opacity-60">
+        {checking ? "מחפשת..." : "איתור העסק שלי"}
+      </button>
+      <p className="text-center text-xs">
+        <a href="?register=1" style={{ color: COLORS.muted }}>אין לך עסק עדיין? פתיחת עסק חדש</a>
+      </p>
+      <p className="text-center text-xs">
+        <a href="./" style={{ color: COLORS.muted }}>ביטול</a>
+      </p>
+    </CenteredScreen>
+  );
+}
+
+// --- Resolves ?biz=<id> to a real business before rendering the app ---
+function BizGateway({ bizId }) {
+  const [status, setStatus] = useState("checking"); // checking | found | missing
+
+  useEffect(() => {
+    let cancelled = false;
+    getBusinessRecord(bizId).then((biz) => {
+      if (!cancelled) setStatus(biz ? "found" : "missing");
+    });
+    return () => { cancelled = true; };
+  }, [bizId]);
+
+  if (status === "checking") {
+    return (
+      <div style={{ background: COLORS.bg, minHeight: "100vh" }} className="flex items-center justify-center text-[15px]">
+        <span style={{ color: COLORS.muted }}>טוען...</span>
+      </div>
+    );
+  }
+  if (status === "missing") {
+    return (
+      <CenteredScreen>
+        <div style={{ color: COLORS.closed }} className="text-2xl text-center">🚫</div>
+        <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">העסק לא נמצא</p>
+        <p style={{ color: COLORS.muted }} className="text-xs text-center">הקישור שגוי או שהעסק הוסר.</p>
+        <a href="?register=1" style={{ background: COLORS.rose }} className="block text-center text-white py-2 rounded-lg text-sm font-medium">
+          פתיחת עסק חדש
+        </a>
+        <a href="?login=1" style={{ color: COLORS.muted }} className="block text-center text-xs">כניסה לעסק קיים</a>
+      </CenteredScreen>
+    );
+  }
+  return <SmartBookingApp bizId={bizId} />;
+}
+
+// --- Landing page shown at the bare app URL (no ?biz=, ?login=, ?register=) ---
+// --- Super-admin oversight mode: see every business, jump into any of them ---
+function AdminGate({ children }) {
+  const [authed, setAuthed] = useState(() => sessionStorage.getItem(ADMIN_SESSION_KEY) === "1");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [checking, setChecking] = useState(false);
+
+  async function handleSubmit() {
+    setError("");
+    setChecking(true);
+    const hash = await sha256Hex(password);
+    setChecking(false);
+    if (hash === ADMIN_PASSWORD_HASH) {
+      sessionStorage.setItem(ADMIN_SESSION_KEY, "1");
+      setAuthed(true);
+    } else {
+      setError("סיסמה שגויה");
+    }
+  }
+
+  if (authed) return children;
+
+  return (
+    <CenteredScreen>
+      <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">כניסת פיקוח</p>
+      <input onFocus={(e) => e.target.select()} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="סיסמת פיקוח" type="password" autoFocus
+        onKeyDown={(e) => { if (e.key === "Enter") handleSubmit(); }}
+        style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+      {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
+      <button onClick={handleSubmit} disabled={checking} style={{ background: COLORS.rose }} className="w-full text-white py-2 rounded-lg text-sm font-medium disabled:opacity-60">
+        {checking ? "בודקת..." : "כניסה"}
+      </button>
+    </CenteredScreen>
+  );
+}
+
+function AdminDashboard() {
+  const [businesses, setBusinesses] = useState(null); // null = loading
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
+
+  async function loadBusinesses() {
+    const registry = await getBusinessRegistry();
+    setBusinesses(registry);
+  }
+
+  useEffect(() => {
+    loadBusinesses();
+  }, []);
+
+  async function handleDelete(bizId) {
+    setDeletingId(bizId);
+    try {
+      await deleteBusiness(bizId);
+      await loadBusinesses();
+    } catch {}
+    setConfirmDeleteId(null);
+    setDeletingId(null);
+  }
+
+  function logoutAdmin() {
+    sessionStorage.removeItem(ADMIN_SESSION_KEY);
+    goTo(`${window.location.origin}${window.location.pathname}`);
+  }
+
+  return (
+    <div style={{ background: COLORS.bg, minHeight: "100vh" }} className="px-5 py-6">
+      <div className="max-w-sm mx-auto space-y-4">
+        <div className="flex items-center justify-between">
+          <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold">מצב פיקוח</p>
+          <button onClick={logoutAdmin} style={{ color: COLORS.muted }} className="text-xs">יציאה</button>
+        </div>
+        <p style={{ color: COLORS.muted }} className="text-xs">
+          {businesses ? `${businesses.length} עסקים` : "טוענת..."}
+        </p>
+        <div className="space-y-2">
+          {businesses && businesses.map((b) => (
+            <div key={b.id} style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-xl p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium truncate">{b.name}</p>
+                  <p style={{ color: COLORS.muted }} className="text-xs" dir="ltr">
+                    {b.phone ? `${b.phone} · ` : ""}{b.id}
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <a href={`?biz=${b.id}`} style={{ borderColor: COLORS.line, color: COLORS.ink }} className="border text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap">
+                    צפייה
+                  </a>
+                  <a href={`?biz=${b.id}&adminEnter=1`} style={{ background: COLORS.rose }} className="text-white text-xs px-2.5 py-1.5 rounded-lg whitespace-nowrap">
+                    כניסה כבעלים
+                  </a>
+                </div>
+              </div>
+              {confirmDeleteId === b.id ? (
+                <div style={{ borderColor: COLORS.line }} className="border-t pt-2 flex items-center justify-between gap-2">
+                  <p style={{ color: COLORS.rose }} className="text-xs">למחוק את העסק לצמיתות?</p>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button onClick={() => handleDelete(b.id)} disabled={deletingId === b.id} style={{ background: COLORS.rose }} className="text-white text-xs px-2.5 py-1.5 rounded-lg disabled:opacity-60">
+                      {deletingId === b.id ? "מוחקת..." : "מחיקה"}
+                    </button>
+                    <button onClick={() => setConfirmDeleteId(null)} style={{ borderColor: COLORS.line }} className="border text-xs px-2.5 py-1.5 rounded-lg">
+                      ביטול
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ borderColor: COLORS.line }} className="border-t pt-2 text-left">
+                  <button onClick={() => setConfirmDeleteId(b.id)} style={{ color: COLORS.muted }} className="text-xs">
+                    🗑 מחיקת עסק
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- Client-facing: find "my" business(es) by phone, from the shared landing page ---
+function ClientBusinessFinder() {
+  const [phone, setPhone] = useState("");
+  const [matches, setMatches] = useState(null); // null = not searched yet, [] = searched, no results
+  const [error, setError] = useState("");
+  const [checking, setChecking] = useState(false);
+
+  async function handleFind() {
+    setError("");
+    if (!isValidPhone(phone)) return setError("מספר טלפון חייב להכיל 10 ספרות");
+    setChecking(true);
+    const found = await getClientBusinessIndex(phone.trim());
+    setChecking(false);
+    if (found.length === 1) {
+      goTo(`${window.location.origin}${window.location.pathname}?biz=${found[0].id}`);
+      return;
+    }
+    setMatches(found);
+  }
+
+  if (matches && matches.length > 1) {
+    return (
+      <CenteredScreen>
+        <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">איפה קבעת תור?</p>
+        <p style={{ color: COLORS.muted }} className="text-xs text-center">נמצאו כמה עסקים עם המספר הזה.</p>
+        <div className="space-y-2">
+          {matches.map((b) => (
+            <a key={b.id} href={`?biz=${b.id}`} style={{ borderColor: COLORS.line }} className="block border rounded-lg px-3 py-2 text-sm text-right">
+              {b.name}
+            </a>
+          ))}
+        </div>
+        <a href="./" style={{ color: COLORS.muted }} className="block text-center text-xs">ביטול</a>
+      </CenteredScreen>
+    );
+  }
+
+  if (matches && matches.length === 0) {
+    return (
+      <CenteredScreen>
+        <div style={{ color: COLORS.closed }} className="text-2xl text-center">🔍</div>
+        <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">לא מצאנו עסק</p>
+        <p style={{ color: COLORS.muted }} className="text-xs text-center">
+          לא נמצא אצלנו תור על שם המספר הזה. יכול להיות שנרשמת עם מספר אחר, או שהכי פשוט לבקש את הקישור ישירות מבעלת העסק שלך.
+        </p>
+        <button onClick={() => setMatches(null)} style={{ background: COLORS.rose }} className="w-full text-white py-2 rounded-lg text-sm font-medium">
+          ניסיון עם מספר אחר
+        </button>
+        <a href="./" style={{ color: COLORS.muted }} className="block text-center text-xs">ביטול</a>
+      </CenteredScreen>
+    );
+  }
+
+  return (
+    <CenteredScreen>
+      <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">כניסה לעסק שלך</p>
+      <p style={{ color: COLORS.muted }} className="text-xs text-center">
+        הזני את מספר הטלפון שאיתו קבעת תור, ונעביר אותך ישר לעסק שלך.
+      </p>
+      <input value={phone} onChange={(e) => { setPhone(e.target.value.replace(/\D/g, "").slice(0, 10)); setError(""); }}
+        placeholder="טלפון (10 ספרות)" type="tel" inputMode="numeric" autoFocus
+        onKeyDown={(e) => { if (e.key === "Enter") handleFind(); }}
+        style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+      {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
+      <button onClick={handleFind} disabled={checking} style={{ background: COLORS.rose }} className="w-full text-white py-2 rounded-lg text-sm font-medium disabled:opacity-60">
+        {checking ? "מחפשת..." : "המשך"}
+      </button>
+      <a href="./" style={{ color: COLORS.muted }} className="block text-center text-xs">ביטול</a>
+    </CenteredScreen>
+  );
+}
+
+function Landing() {
+  const [deferredInstallPrompt, setDeferredInstallPrompt] = useState(null);
+  const [isIOS, setIsIOS] = useState(false);
+  const [isStandalone, setIsStandalone] = useState(false);
+  const [showIOSTip, setShowIOSTip] = useState(false);
+  const [installBannerDismissed, setInstallBannerDismissed] = useState(false);
+
+  useEffect(() => {
+    registerServiceWorker();
+    setIsIOS(/iphone|ipad|ipod/i.test(window.navigator.userAgent) && !window.MSStream);
+    setIsStandalone(
+      window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator.standalone === true
+    );
+    const onBeforeInstall = (e) => {
+      e.preventDefault();
+      setDeferredInstallPrompt(e);
+    };
+    const onInstalled = () => {
+      setDeferredInstallPrompt(null);
+      setInstallBannerDismissed(true);
+    };
+    window.addEventListener("beforeinstallprompt", onBeforeInstall);
+    window.addEventListener("appinstalled", onInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onBeforeInstall);
+      window.removeEventListener("appinstalled", onInstalled);
+    };
+  }, []);
+
+  async function handleInstallClick() {
+    if (deferredInstallPrompt) {
+      deferredInstallPrompt.prompt();
+      await deferredInstallPrompt.userChoice;
+      setDeferredInstallPrompt(null);
+    } else if (isIOS) {
+      setShowIOSTip(true);
+    }
+  }
+
+  return (
+    <div style={{ background: COLORS.bg, minHeight: "100vh" }} className="flex items-center justify-center px-5">
+      <div className="w-full max-w-sm text-center space-y-6">
+        <div>
+          <span style={{ color: COLORS.rose }} className="text-3xl leading-none">✦</span>
+          <h1 style={{ fontFamily: "'Frank Ruhl Libre', serif", color: COLORS.ink }} className="text-2xl font-bold mt-2">
+            לוח תורים חכם
+          </h1>
+          <p style={{ color: COLORS.muted }} className="text-sm mt-1">
+            קביעת תורים חכמה לכל בעל/ת עסק
+          </p>
+        </div>
+        <div className="space-y-3">
+          <a href="?clientLogin=1" style={{ background: COLORS.rose }} className="block text-white py-3 rounded-xl text-sm font-medium">
+            👤 כניסה לקביעת תור
+          </a>
+        </div>
+        <div style={{ borderColor: COLORS.line }} className="border-t pt-4 space-y-2">
+          <p style={{ color: COLORS.muted }} className="text-xs">לבעלות עסקים</p>
+          <div className="flex gap-2">
+            <a href="?login=1" style={{ borderColor: COLORS.rose, color: COLORS.rose }} className="flex-1 border-2 py-2.5 rounded-xl text-sm font-medium">
+              כניסה לעסק קיים
+            </a>
+            <a href="?register=1" style={{ borderColor: COLORS.rose, color: COLORS.rose }} className="flex-1 border-2 py-2.5 rounded-xl text-sm font-medium">
+              🏪 עסק חדש
+            </a>
+          </div>
+        </div>
+
+        {!isStandalone && !installBannerDismissed && (deferredInstallPrompt || isIOS) && (
+          <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-xl p-3 flex items-center justify-between gap-3">
+            <p style={{ color: COLORS.muted }} className="text-xs text-right">📲 אפשר להתקין את לוח תורים חכם כאפליקציה למסך הבית</p>
+            <div className="flex items-center gap-2 shrink-0">
+              <button onClick={handleInstallClick} style={{ background: COLORS.rose }} className="text-white text-xs px-3 py-1.5 rounded-full font-medium whitespace-nowrap">
+                התקנה
+              </button>
+              <button onClick={() => setInstallBannerDismissed(true)} style={{ color: COLORS.muted }} className="text-xs">✕</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {showIOSTip && (
+        <div className="fixed inset-0 flex items-center justify-center z-50" style={{ background: "rgba(43,29,34,0.45)" }}>
+          <div style={{ background: "white", borderColor: COLORS.line }} className="border rounded-2xl p-5 w-[90%] max-w-xs space-y-3 text-center">
+            <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold">התקנה למסך הבית</p>
+            <p className="text-sm">
+              לחצי על כפתור השיתוף <span className="inline-block">⬆️</span> בסרגל הכלים של ספארי, ואז בחרי <strong>"הוסף למסך הבית"</strong>.
+            </p>
+            <button onClick={() => setShowIOSTip(false)} style={{ background: COLORS.rose }} className="text-white text-sm px-4 py-2 rounded-lg font-medium w-full">
+              הבנתי
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- Top-level router based on the URL: ?register=1 / ?login=1 / ?clientLogin=1 / ?biz=<id> / ?admin=1 / default landing ---
+function Root() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has("register")) return <BusinessRegister />;
+  if (params.has("login")) return <BusinessLogin />;
+  if (params.has("clientLogin")) return <ClientBusinessFinder />;
+  if (params.has("admin")) return <AdminGate><AdminDashboard /></AdminGate>;
+  const bizParam = params.get("biz");
+  if (bizParam) return <BizGateway bizId={bizParam} />;
+  return <Landing />;
+}
+
+function bootstrap() {
+  if (!window.storage) {
+    setTimeout(bootstrap, 20);
+    return;
+  }
+  ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
+}
+bootstrap();
+</script>
+</body>
+</html>
