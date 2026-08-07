@@ -112,7 +112,7 @@ const DEFAULT_SETTINGS = {
 
 const STEP = 15;
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "2.9.0";
+const APP_VERSION = "2.9.1";
 
 // --- Service worker: offline caching + enables PWA installability.
 // The install prompt itself is only offered on the shared Landing page
@@ -340,10 +340,15 @@ async function removeFromBizClientRegistry(bizId, phone) {
 // not an OS-level push notification when the app/phone is closed, which
 // would need a separate push-notification server.
 async function pushOwnerNotice(bizId, notice) {
+  let list = [];
   try {
     const res = await window.storage.get(scopedKey(bizId, "ownerNotices"));
-    const list = res?.value ? JSON.parse(res.value) : [];
-    const updated = [...list, notice].slice(-20); // keep the feed small
+    list = res?.value ? JSON.parse(res.value) : [];
+  } catch {
+    list = [];
+  }
+  const updated = [...list, notice].slice(-20); // keep the feed small
+  try {
     await window.storage.set(scopedKey(bizId, "ownerNotices"), JSON.stringify(updated));
   } catch {}
 }
