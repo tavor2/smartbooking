@@ -112,7 +112,7 @@ const DEFAULT_SETTINGS = {
 
 const STEP = 15;
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "2.3.0";
+const APP_VERSION = "2.4.0";
 
 // --- Service worker: offline caching + enables PWA installability.
 // The install prompt itself is only offered on the shared Landing page
@@ -153,6 +153,31 @@ function hoursUntilAppt(dateStr, startMinutes) {
 }
 function isValidPhone(p) {
   return /^\d{10}$/.test((p || "").trim());
+}
+
+// --- Local client session (per device, per business) — lets a client who
+// already logged in once be recognized automatically the next time she
+// opens this business's page, without retyping her phone number.
+function clientSessionKey(bizId) {
+  return `sb_client_session:${bizId}`;
+}
+function getSavedClientSession(bizId) {
+  try {
+    const raw = localStorage.getItem(clientSessionKey(bizId));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+function saveClientSession(bizId, profile) {
+  try {
+    localStorage.setItem(clientSessionKey(bizId), JSON.stringify(profile));
+  } catch {}
+}
+function clearClientSession(bizId) {
+  try {
+    localStorage.removeItem(clientSessionKey(bizId));
+  } catch {}
 }
 function minToTime(m) {
   const h = Math.floor(m / 60);
@@ -451,6 +476,18 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
     registerServiceWorker();
   }, []);
 
+  // Auto-login a returning client from this device's saved session, so she
+  // doesn't have to retype her phone number every visit.
+  useEffect(() => {
+    const saved = getSavedClientSession(bizId);
+    if (saved?.phone && saved?.name) {
+      setLoggedInClient(saved);
+      setClientName(saved.name);
+      setClientPhone(saved.phone);
+      refreshMyUpcoming(saved.phone);
+    }
+  }, [bizId]);
+
   const startMin = settings.businessStart * 60;
   const endMin = settings.businessEnd * 60;
   const selectedService =
@@ -614,6 +651,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
     } catch {}
     addToClientBusinessIndex(phone.trim(), bizId, settings.businessName || DEFAULT_SETTINGS.businessName).catch(() => {});
     upsertBizClientRegistry(bizId, phone.trim(), name.trim()).catch(() => {});
+    saveClientSession(bizId, profile);
     setLoggedInClient(profile);
     setClientName(profile.name);
     setClientPhone(profile.phone);
@@ -621,6 +659,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
   }
 
   function logoutClient() {
+    clearClientSession(bizId);
     setLoggedInClient(null);
     setMyUpcoming([]);
     setClientName("");
