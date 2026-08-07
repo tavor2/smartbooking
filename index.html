@@ -112,7 +112,7 @@ const DEFAULT_SETTINGS = {
 
 const STEP = 15;
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "2.4.0";
+const APP_VERSION = "2.5.0";
 
 // --- Service worker: offline caching + enables PWA installability.
 // The install prompt itself is only offered on the shared Landing page
@@ -362,6 +362,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
 
   // --- client identity (login/registration by phone) ---
   const [loggedInClient, setLoggedInClient] = useState(null); // {name, phone}
+  const [clientAuthPrefillPhone, setClientAuthPrefillPhone] = useState("");
   const [myUpcoming, setMyUpcoming] = useState([]);
   const [myUpcomingLoading, setMyUpcomingLoading] = useState(false);
   const [myCancelId, setMyCancelId] = useState(null);
@@ -485,6 +486,24 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
       setClientName(saved.name);
       setClientPhone(saved.phone);
       refreshMyUpcoming(saved.phone);
+      return;
+    }
+    // No saved session on this device yet — if she arrived via the shared
+    // landing page's phone finder (?clientPhone=...), she already typed
+    // her number once there. Recognize her by it immediately instead of
+    // asking her to type it again on this page.
+    const phoneFromLink = new URLSearchParams(window.location.search).get("clientPhone");
+    if (phoneFromLink && isValidPhone(phoneFromLink)) {
+      window.storage.get(scopedKey(bizId, `client:${phoneFromLink}`))
+        .then((res) => {
+          const profile = JSON.parse(res.value);
+          return loginOrRegisterClient(profile.phone, profile.name);
+        })
+        .catch(() => {
+          // Not (yet) a registered client of this specific business —
+          // pre-fill the phone field so she still doesn't retype it.
+          setClientAuthPrefillPhone(phoneFromLink);
+        });
     }
   }, [bizId]);
 
@@ -830,6 +849,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
                 myCancelAppointment={myCancelAppointment}
                 cancelLimitHours={settings.cancelLimitHours ?? 48}
                 ownerPhone={settings.ownerPhone}
+                initialPhone={clientAuthPrefillPhone}
               />
             )}
             <ClientBooking
@@ -898,8 +918,8 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
   );
 }
 
-function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient, myUpcoming, myUpcomingLoading, myCancelId, setMyCancelId, myCancelAppointment, cancelLimitHours, ownerPhone }) {
-  const [phone, setPhone] = useState("");
+function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient, myUpcoming, myUpcomingLoading, myCancelId, setMyCancelId, myCancelAppointment, cancelLimitHours, ownerPhone, initialPhone }) {
+  const [phone, setPhone] = useState(initialPhone || "");
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState("");
   const [checking, setChecking] = useState(false);
@@ -1940,7 +1960,7 @@ function ClientBusinessFinder() {
     const found = await getClientBusinessIndex(phone.trim());
     setChecking(false);
     if (found.length === 1) {
-      goTo(`${window.location.origin}${window.location.pathname}?biz=${found[0].id}`);
+      goTo(`${window.location.origin}${window.location.pathname}?biz=${found[0].id}&clientPhone=${encodeURIComponent(phone.trim())}`);
       return;
     }
     setMatches(found);
@@ -1953,7 +1973,7 @@ function ClientBusinessFinder() {
         <p style={{ color: COLORS.muted }} className="text-xs text-center">נמצאו כמה עסקים עם המספר הזה.</p>
         <div className="space-y-2">
           {matches.map((b) => (
-            <a key={b.id} href={`?biz=${b.id}`} style={{ borderColor: COLORS.line }} className="block border rounded-lg px-3 py-2 text-sm text-right">
+            <a key={b.id} href={`?biz=${b.id}&clientPhone=${encodeURIComponent(phone.trim())}`} style={{ borderColor: COLORS.line }} className="block border rounded-lg px-3 py-2 text-sm text-right">
               {b.name}
             </a>
           ))}
@@ -1981,9 +2001,9 @@ function ClientBusinessFinder() {
 
   return (
     <CenteredScreen>
-      <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">כניסה לעסק שלך</p>
+      <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">כניסה לקביעת תור</p>
       <p style={{ color: COLORS.muted }} className="text-xs text-center">
-        הזני את מספר הטלפון שאיתו קבעת תור, ונעביר אותך ישר לעסק שלך.
+        הזני את מספר הטלפון שאיתו קבעת תור, ונעביר אותך ישר לכרטיס הלקוחה שלך אצל העסק.
       </p>
       <input value={phone} onChange={(e) => { setPhone(e.target.value.replace(/\D/g, "").slice(0, 10)); setError(""); }}
         placeholder="טלפון (10 ספרות)" type="tel" inputMode="numeric" autoFocus
