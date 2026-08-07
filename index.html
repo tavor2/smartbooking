@@ -74,7 +74,7 @@ body { font-family: 'Heebo', sans-serif; margin: 0; }
 <div id="root"></div>
 
 <script type="text/babel">
-const { useState, useEffect, useMemo, useCallback } = React;
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 const COLORS = {
   bg: "#FBF6F4",
@@ -112,7 +112,7 @@ const DEFAULT_SETTINGS = {
 
 const STEP = 15;
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "2.6.1";
+const APP_VERSION = "2.9.0";
 
 // --- Service worker: offline caching + enables PWA installability.
 // The install prompt itself is only offered on the shared Landing page
@@ -333,6 +333,21 @@ async function removeFromBizClientRegistry(bizId, phone) {
   return saveBizClientRegistry(bizId, list.filter((c) => c.phone !== phone));
 }
 
+// --- Live in-app notice feed for the owner, e.g. "client cancelled her
+// appointment". The owner's screen subscribes to this key in real time
+// (same mechanism as everything else in this app) and pops up a toast.
+// Note: this only works while the owner has the app open in a tab — it is
+// not an OS-level push notification when the app/phone is closed, which
+// would need a separate push-notification server.
+async function pushOwnerNotice(bizId, notice) {
+  try {
+    const res = await window.storage.get(scopedKey(bizId, "ownerNotices"));
+    const list = res?.value ? JSON.parse(res.value) : [];
+    const updated = [...list, notice].slice(-20); // keep the feed small
+    await window.storage.set(scopedKey(bizId, "ownerNotices"), JSON.stringify(updated));
+  } catch {}
+}
+
 function generateDates(n) {
   const out = [];
   const today = new Date();
@@ -446,6 +461,36 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
       setMode("owner");
     }
   }, [bizId]);
+
+  // --- live "client cancelled" toast for the owner ---
+  const [ownerNotice, setOwnerNotice] = useState(null);
+  const ownerNoticeBaselineRef = useRef(null); // null = not yet established
+
+  useEffect(() => {
+    if (!ownerUnlocked) return;
+    ownerNoticeBaselineRef.current = null;
+    const unsub = window.storage.subscribe(scopedKey(bizId, "ownerNotices"), (val) => {
+      const list = val ? JSON.parse(val) : [];
+      if (ownerNoticeBaselineRef.current === null) {
+        // First snapshot right after unlocking owner mode — this just
+        // establishes where we're starting from, so old notices from
+        // before she opened the app don't all pop up at once.
+        ownerNoticeBaselineRef.current = list.length;
+        return;
+      }
+      if (list.length > ownerNoticeBaselineRef.current) {
+        setOwnerNotice(list[list.length - 1]);
+        ownerNoticeBaselineRef.current = list.length;
+      }
+    });
+    return () => unsub && unsub();
+  }, [bizId, ownerUnlocked]);
+
+  useEffect(() => {
+    if (!ownerNotice) return;
+    const t = setTimeout(() => setOwnerNotice(null), 7000);
+    return () => clearTimeout(t);
+  }, [ownerNotice]);
 
   async function submitOwnerPassword() {
     setOwnerPassError("");
@@ -726,6 +771,15 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
     } catch {}
     await removeFromClientIndex(appt.clientPhone, appt.id);
     setMyCancelId(null);
+    pushOwnerNotice(bizId, {
+      id: genId(),
+      ts: Date.now(),
+      clientName: appt.clientName,
+      date: appt.date,
+      start: appt.start,
+      end: appt.end,
+      serviceName: appt.serviceName,
+    }).catch(() => {});
   }
 
   async function saveSettings(next) {
@@ -771,20 +825,33 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
 
   return (
     <div style={{ background: COLORS.bg, color: COLORS.ink, minHeight: "100vh" }} className="w-full">
-      <div style={{ borderColor: COLORS.line }} className="border-b px-5 py-4 flex items-center justify-between max-w-2xl mx-auto">
-        <div className="flex items-center gap-2">
-          <span style={{ color: COLORS.rose }} className="text-lg leading-none">✦</span>
-          <div>
+      {ownerNotice && (
+        <div className="fixed top-3 inset-x-3 z-50 flex justify-center pointer-events-none">
+          <div style={{ background: COLORS.closed, color: "white" }} className="pointer-events-auto rounded-xl shadow-lg px-4 py-3 max-w-sm w-full flex items-start justify-between gap-3">
+            <div className="text-sm">
+              <p className="font-medium">⚠️ ביטול תור</p>
+              <p className="text-xs mt-0.5 opacity-90">
+                {ownerNotice.clientName} ביטלה תור ל{ownerNotice.serviceName} · {ownerNotice.date} · {minToTime(ownerNotice.start)}
+              </p>
+            </div>
+            <button onClick={() => setOwnerNotice(null)} className="text-white/80 text-xs shrink-0">✕</button>
+          </div>
+        </div>
+      )}
+      <div style={{ borderColor: COLORS.line }} className="border-b px-5 py-4 relative max-w-2xl mx-auto">
+        <div className="flex flex-col items-center text-center gap-1">
+          <div className="flex items-center gap-2">
+            <span style={{ color: COLORS.rose }} className="text-lg leading-none">✦</span>
             <h1 style={{ fontFamily: "'Frank Ruhl Libre', serif", color: COLORS.ink }} className="text-xl font-bold leading-none">
               {settings.businessName || DEFAULT_SETTINGS.businessName}
             </h1>
-            <p style={{ color: COLORS.muted }} className="text-xs mt-1">
-              {settings.tagline || DEFAULT_SETTINGS.tagline}
-            </p>
           </div>
+          <p style={{ color: COLORS.muted }} className="text-xs">
+            {settings.tagline || DEFAULT_SETTINGS.tagline}
+          </p>
         </div>
         {showOwnerToggle && (
-          <div style={{ background: COLORS.roseSoft }} className="flex rounded-full p-1 text-xs font-medium">
+          <div style={{ background: COLORS.roseSoft }} className="absolute left-5 top-1/2 -translate-y-1/2 flex rounded-full p-1 text-xs font-medium">
             <button onClick={() => { setBookingForClient(null); setMode("client"); }}
               style={{ background: mode === "client" ? COLORS.rose : "transparent", color: mode === "client" ? "white" : COLORS.ink }}
               className="px-3 py-1.5 rounded-full transition-colors">לקוח/ה</button>
@@ -928,11 +995,6 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
 
       <div className="text-center pb-4 space-y-1">
         <p style={{ color: COLORS.muted }} className="text-[10px]">גרסה {APP_VERSION}</p>
-        <p className="text-[11px]">
-          <a href="?register=1" style={{ color: COLORS.rose }} className="font-medium">🏪 פתיחת עסק חדש באפליקציה</a>
-          <span style={{ color: COLORS.muted }}> · </span>
-          <a href="?login=1" style={{ color: COLORS.muted }}>כניסה לעסק קיים</a>
-        </p>
       </div>
 
       {showOwnerLogin && (
@@ -1165,6 +1227,7 @@ function SlotGroup({ label, slots, selectedSlot, onSelect }) {
 
 function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConfirmCancelId, cancelAppointment, showSettings, setShowSettings, settings, saveSettings, updateService, removeService, addService, addClosure, removeClosure, saveMsg, onBookForClient }) {
   const [showClients, setShowClients] = useState(false);
+  const [showNotices, setShowNotices] = useState(false);
   const sorted = [...appointments].sort((a, b) => a.start - b.start);
   return (
     <div className="space-y-4">
@@ -1173,6 +1236,9 @@ function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConf
         <div className="flex items-center gap-2">
           <button onClick={() => setShowClients((v) => !v)} style={{ background: COLORS.roseSoft, color: COLORS.rose }} className="text-sm font-medium px-3 py-2 rounded-full">
             👥 לקוחות
+          </button>
+          <button onClick={() => setShowNotices((v) => !v)} style={{ background: COLORS.roseSoft, color: COLORS.rose }} className="text-sm font-medium px-3 py-2 rounded-full">
+            🔔 התראות
           </button>
           <button onClick={() => setShowSettings((v) => !v)} style={{ background: COLORS.roseSoft, color: COLORS.rose }} className="text-sm font-medium px-3 py-2 rounded-full">
             ⚙ הגדרות
@@ -1210,6 +1276,13 @@ function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConf
         <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4">
           <p style={{ color: COLORS.muted }} className="text-xs font-medium mb-2">ניהול לקוחות</p>
           <ClientsManager bizId={bizId} businessName={settings.businessName} onBookForClient={onBookForClient} />
+        </div>
+      )}
+
+      {showNotices && (
+        <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4">
+          <p style={{ color: COLORS.muted }} className="text-xs font-medium mb-2">היסטוריית ביטולים</p>
+          <NoticesPanel bizId={bizId} />
         </div>
       )}
 
@@ -1441,6 +1514,81 @@ function ClientsManager({ bizId, businessName, onBookForClient }) {
                   <button onClick={() => setConfirmDeletePhone(c.phone)} style={{ color: COLORS.muted }} className="text-[11px]">🗑 הסרת לקוח/ה</button>
                 )
               )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- Persistent history view of the live cancellation-notice feed (the
+// same data the toast pops up from) — so the owner can scroll back and
+// see cancellations she missed while the app wasn't open.
+function NoticesPanel({ bizId }) {
+  const [notices, setNotices] = useState(null); // null = loading
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  async function load() {
+    try {
+      const res = await window.storage.get(scopedKey(bizId, "ownerNotices"));
+      const list = res?.value ? JSON.parse(res.value) : [];
+      setNotices([...list].reverse()); // newest first
+    } catch {
+      setNotices([]);
+    }
+  }
+
+  useEffect(() => { load(); }, [bizId]);
+
+  async function clearAll() {
+    try {
+      await window.storage.set(scopedKey(bizId, "ownerNotices"), JSON.stringify([]));
+    } catch {}
+    setNotices([]);
+    setConfirmClear(false);
+  }
+
+  function formatTs(ts) {
+    const d = new Date(ts);
+    const day = String(d.getDate()).padStart(2, "0");
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const h = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return `${day}/${m} · ${h}:${mm}`;
+  }
+
+  if (notices === null) {
+    return <p style={{ color: COLORS.muted }} className="text-xs">טוענת...</p>;
+  }
+
+  return (
+    <div className="space-y-3">
+      {notices.length > 0 && (
+        <div className="flex justify-end">
+          {confirmClear ? (
+            <div className="flex items-center gap-1.5">
+              <button onClick={clearAll} style={{ background: COLORS.rose }} className="text-white text-xs px-2.5 py-1 rounded-lg">אישור ניקוי</button>
+              <button onClick={() => setConfirmClear(false)} style={{ borderColor: COLORS.line }} className="border text-xs px-2.5 py-1 rounded-lg">ביטול</button>
+            </div>
+          ) : (
+            <button onClick={() => setConfirmClear(true)} style={{ color: COLORS.muted }} className="text-[11px]">🗑 ניקוי היסטוריה</button>
+          )}
+        </div>
+      )}
+      {notices.length === 0 ? (
+        <p style={{ color: COLORS.muted }} className="text-xs">אין ביטולים להצגה.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {notices.map((n) => (
+            <div key={n.id} style={{ borderColor: COLORS.line, background: COLORS.bg }} className="border rounded-lg p-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-medium">{n.clientName} ביטלה תור</p>
+                <p style={{ color: COLORS.muted }} className="text-[10px] shrink-0">בוטל ב-{formatTs(n.ts)}</p>
+              </div>
+              <p style={{ color: COLORS.muted, fontFamily: "'JetBrains Mono', monospace" }} className="text-xs mt-0.5">
+                {n.serviceName} · {n.date} · {minToTime(n.start)}–{minToTime(n.end)}
+              </p>
             </div>
           ))}
         </div>
