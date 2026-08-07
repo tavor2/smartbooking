@@ -112,7 +112,7 @@ const DEFAULT_SETTINGS = {
 
 const STEP = 15;
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "2.4.0";
+const APP_VERSION = "2.6.0";
 
 // --- Service worker: offline caching + enables PWA installability.
 // The install prompt itself is only offered on the shared Landing page
@@ -220,6 +220,14 @@ const REGISTRY_KEY = "businessRegistry";
 // in the source, only its hash. Current password: given to Yaron directly.
 const ADMIN_PASSWORD_HASH = "9da38c3e715e308d49dc54055eaab48be8aac6ed1802c25b972ace3ff52866fb";
 const ADMIN_SESSION_KEY = "sb_admin_auth";
+
+// Marks this browser tab as already having verified the owner's password
+// for a specific business (set right after a successful login/registration/
+// reset), so the page that follows can open straight into owner mode
+// instead of asking for the password a second time.
+function ownerSessionKey(bizId) {
+  return `sb_owner_session:${bizId}`;
+}
 
 function scopedKey(bizId, base) {
   return `biz:${bizId}:${base}`;
@@ -362,24 +370,36 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
 
   // --- client identity (login/registration by phone) ---
   const [loggedInClient, setLoggedInClient] = useState(null); // {name, phone}
+  const [clientAuthPrefillPhone, setClientAuthPrefillPhone] = useState("");
   const [myUpcoming, setMyUpcoming] = useState([]);
   const [myUpcomingLoading, setMyUpcomingLoading] = useState(false);
   const [myCancelId, setMyCancelId] = useState(null);
 
   // --- owner booking on behalf of a client from her client list ---
   const [bookingForClient, setBookingForClient] = useState(null); // {name, phone} | null
+  const [bookingForClientUpcoming, setBookingForClientUpcoming] = useState([]);
+  const [bookingForClientUpcomingLoading, setBookingForClientUpcomingLoading] = useState(false);
 
-  function startBookingForClient(client) {
+  async function startBookingForClient(client) {
     setBookingForClient(client);
     setClientName(client.name);
     setClientPhone(client.phone);
     setSelectedSlot(null);
     setSuccessMsg("");
     setMode("client");
+    // So the owner can see what's already booked for this client before
+    // adding a new appointment (avoids double-booking / helps pick a slot).
+    setBookingForClientUpcomingLoading(true);
+    const list = await getClientAppts(client.phone);
+    setBookingForClientUpcoming(
+      list.filter((a) => isUpcoming(a)).sort((a, b) => (a.date + minToTime(a.start)).localeCompare(b.date + minToTime(b.start)))
+    );
+    setBookingForClientUpcomingLoading(false);
   }
 
   function stopBookingForClient() {
     setBookingForClient(null);
+    setBookingForClientUpcoming([]);
     setClientName("");
     setClientPhone("");
     setSelectedSlot(null);
@@ -419,7 +439,13 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
       setOwnerUnlocked(true);
       setMode("owner");
     }
-  }, []);
+    // Regular owner login/registration/password-reset already verified the
+    // password one screen ago — no reason to ask for it again here.
+    if (params.get("owner") === "1" && sessionStorage.getItem(ownerSessionKey(bizId)) === "1") {
+      setOwnerUnlocked(true);
+      setMode("owner");
+    }
+  }, [bizId]);
 
   async function submitOwnerPassword() {
     setOwnerPassError("");
@@ -485,6 +511,24 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
       setClientName(saved.name);
       setClientPhone(saved.phone);
       refreshMyUpcoming(saved.phone);
+      return;
+    }
+    // No saved session on this device yet — if she arrived via the shared
+    // landing page's phone finder (?clientPhone=...), she already typed
+    // her number once there. Recognize her by it immediately instead of
+    // asking her to type it again on this page.
+    const phoneFromLink = new URLSearchParams(window.location.search).get("clientPhone");
+    if (phoneFromLink && isValidPhone(phoneFromLink)) {
+      window.storage.get(scopedKey(bizId, `client:${phoneFromLink}`))
+        .then((res) => {
+          const profile = JSON.parse(res.value);
+          return loginOrRegisterClient(profile.phone, profile.name);
+        })
+        .catch(() => {
+          // Not (yet) a registered client of this specific business —
+          // pre-fill the phone field so she still doesn't retype it.
+          setClientAuthPrefillPhone(phoneFromLink);
+        });
     }
   }, [bizId]);
 
@@ -583,6 +627,11 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
       upsertBizClientRegistry(bizId, newAppt.clientPhone, newAppt.clientName).catch(() => {});
       if (loggedInClient?.phone === newAppt.clientPhone) {
         setMyUpcoming(updatedList.filter((a) => isUpcoming(a)));
+      }
+      if (bookingForClient?.phone === newAppt.clientPhone) {
+        setBookingForClientUpcoming(
+          updatedList.filter((a) => isUpcoming(a)).sort((a, b) => (a.date + minToTime(a.start)).localeCompare(b.date + minToTime(b.start)))
+        );
       }
     }
     setSuccessMsg(`נקבע לך תור ל${selectedService.name} בשעה ${minToTime(selectedSlot)}`);
@@ -808,13 +857,30 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
         {mode === "client" ? (
           <div className="space-y-4">
             {bookingForClient && (
-              <div style={{ borderColor: COLORS.sage, background: COLORS.sageSoft }} className="border rounded-xl p-3 flex items-center justify-between gap-2">
-                <p className="text-xs">
-                  קובעת תור עבור <span className="font-medium">{bookingForClient.name}</span> · {bookingForClient.phone}
-                </p>
-                <button onClick={stopBookingForClient} style={{ color: COLORS.rose }} className="text-xs font-medium shrink-0 whitespace-nowrap">
-                  חזרה לניהול לקוחות
-                </button>
+              <div style={{ borderColor: COLORS.sage, background: COLORS.sageSoft }} className="border rounded-xl p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs">
+                    קובעת תור עבור <span className="font-medium">{bookingForClient.name}</span> · {bookingForClient.phone}
+                  </p>
+                  <button onClick={stopBookingForClient} style={{ color: COLORS.rose }} className="text-xs font-medium shrink-0 whitespace-nowrap">
+                    חזרה לניהול לקוחות
+                  </button>
+                </div>
+                {bookingForClientUpcomingLoading ? (
+                  <p style={{ color: COLORS.muted }} className="text-xs">בודקת תורים קיימים...</p>
+                ) : bookingForClientUpcoming.length > 0 ? (
+                  <div className="space-y-1.5">
+                    <p style={{ color: COLORS.muted }} className="text-[11px] font-medium">התורים העתידיים שלה:</p>
+                    {bookingForClientUpcoming.map((a) => (
+                      <div key={a.id} style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-lg px-2.5 py-1.5 text-xs flex items-center justify-between gap-2">
+                        <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{a.date} · {minToTime(a.start)}–{minToTime(a.end)}</span>
+                        <span>{a.serviceName}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p style={{ color: COLORS.muted }} className="text-[11px]">אין לה תורים עתידיים רשומים.</p>
+                )}
               </div>
             )}
             {!bookingForClient && (
@@ -830,6 +896,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
                 myCancelAppointment={myCancelAppointment}
                 cancelLimitHours={settings.cancelLimitHours ?? 48}
                 ownerPhone={settings.ownerPhone}
+                initialPhone={clientAuthPrefillPhone}
               />
             )}
             <ClientBooking
@@ -898,8 +965,8 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
   );
 }
 
-function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient, myUpcoming, myUpcomingLoading, myCancelId, setMyCancelId, myCancelAppointment, cancelLimitHours, ownerPhone }) {
-  const [phone, setPhone] = useState("");
+function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient, myUpcoming, myUpcomingLoading, myCancelId, setMyCancelId, myCancelAppointment, cancelLimitHours, ownerPhone, initialPhone }) {
+  const [phone, setPhone] = useState(initialPhone || "");
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState("");
   const [checking, setChecking] = useState(false);
@@ -1588,7 +1655,7 @@ function BusinessRegister() {
             className="border flex-1 py-2 rounded-lg text-sm font-medium">
             העתקת קישור
           </button>
-          <button onClick={() => goTo(`${created.link}&owner=1`)} style={{ background: COLORS.rose }} className="flex-1 text-white py-2 rounded-lg text-sm font-medium">
+          <button onClick={() => { sessionStorage.setItem(ownerSessionKey(created.id), "1"); goTo(`${created.link}&owner=1`); }} style={{ background: COLORS.rose }} className="flex-1 text-white py-2 rounded-lg text-sm font-medium">
             כניסה לעסק שלי
           </button>
         </div>
@@ -1661,6 +1728,7 @@ function BusinessLogin() {
       const biz = await getBusinessRecord(selected.id);
       const hash = await sha256Hex(password);
       if (biz && hash === biz.passwordHash) {
+        sessionStorage.setItem(ownerSessionKey(selected.id), "1");
         goTo(`${window.location.origin}${window.location.pathname}?biz=${selected.id}&owner=1`);
         return;
       }
@@ -1681,6 +1749,7 @@ function BusinessLogin() {
       const biz = await getBusinessRecord(selected.id);
       const passwordHash = await sha256Hex(newPassword);
       await window.storage.set(`business:${selected.id}`, JSON.stringify({ ...(biz || {}), id: selected.id, passwordHash }));
+      sessionStorage.setItem(ownerSessionKey(selected.id), "1");
       goTo(`${window.location.origin}${window.location.pathname}?biz=${selected.id}&owner=1`);
       return;
     } catch {
@@ -1940,7 +2009,7 @@ function ClientBusinessFinder() {
     const found = await getClientBusinessIndex(phone.trim());
     setChecking(false);
     if (found.length === 1) {
-      goTo(`${window.location.origin}${window.location.pathname}?biz=${found[0].id}`);
+      goTo(`${window.location.origin}${window.location.pathname}?biz=${found[0].id}&clientPhone=${encodeURIComponent(phone.trim())}`);
       return;
     }
     setMatches(found);
@@ -1953,7 +2022,7 @@ function ClientBusinessFinder() {
         <p style={{ color: COLORS.muted }} className="text-xs text-center">נמצאו כמה עסקים עם המספר הזה.</p>
         <div className="space-y-2">
           {matches.map((b) => (
-            <a key={b.id} href={`?biz=${b.id}`} style={{ borderColor: COLORS.line }} className="block border rounded-lg px-3 py-2 text-sm text-right">
+            <a key={b.id} href={`?biz=${b.id}&clientPhone=${encodeURIComponent(phone.trim())}`} style={{ borderColor: COLORS.line }} className="block border rounded-lg px-3 py-2 text-sm text-right">
               {b.name}
             </a>
           ))}
@@ -1981,9 +2050,9 @@ function ClientBusinessFinder() {
 
   return (
     <CenteredScreen>
-      <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">כניסה לעסק שלך</p>
+      <p style={{ fontFamily: "'Frank Ruhl Libre', serif" }} className="text-lg font-bold text-center">כניסה לקביעת תור</p>
       <p style={{ color: COLORS.muted }} className="text-xs text-center">
-        הזני את מספר הטלפון שאיתו קבעת תור, ונעביר אותך ישר לעסק שלך.
+        הזני את מספר הטלפון שאיתו קבעת תור, ונעביר אותך ישר לכרטיס הלקוחה שלך אצל העסק.
       </p>
       <input value={phone} onChange={(e) => { setPhone(e.target.value.replace(/\D/g, "").slice(0, 10)); setError(""); }}
         placeholder="טלפון (10 ספרות)" type="tel" inputMode="numeric" autoFocus
