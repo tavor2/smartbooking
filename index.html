@@ -112,7 +112,7 @@ const DEFAULT_SETTINGS = {
 
 const STEP = 15;
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "2.1.0";
+const APP_VERSION = "2.3.0";
 
 // --- Service worker: offline caching + enables PWA installability.
 // The install prompt itself is only offered on the shared Landing page
@@ -270,6 +270,36 @@ async function addToClientBusinessIndex(phone, bizId, businessName) {
   return updated;
 }
 
+// --- Per-business client registry: powers the owner's client list (add /
+// edit / remove / book-for), separate from clientBiz above which is the
+// reverse index a client uses to find her way back to "her" businesses.
+async function getBizClientRegistry(bizId) {
+  try {
+    const res = await window.storage.get(scopedKey(bizId, "clientRegistry"));
+    return res?.value ? JSON.parse(res.value) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveBizClientRegistry(bizId, list) {
+  await window.storage.set(scopedKey(bizId, "clientRegistry"), JSON.stringify(list));
+  return list;
+}
+
+async function upsertBizClientRegistry(bizId, phone, name) {
+  const list = await getBizClientRegistry(bizId);
+  const idx = list.findIndex((c) => c.phone === phone);
+  if (idx >= 0) list[idx] = { ...list[idx], name };
+  else list.push({ phone, name, createdAt: Date.now() });
+  return saveBizClientRegistry(bizId, list);
+}
+
+async function removeFromBizClientRegistry(bizId, phone) {
+  const list = await getBizClientRegistry(bizId);
+  return saveBizClientRegistry(bizId, list.filter((c) => c.phone !== phone));
+}
+
 function generateDates(n) {
   const out = [];
   const today = new Date();
@@ -311,6 +341,27 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
   const [myUpcomingLoading, setMyUpcomingLoading] = useState(false);
   const [myCancelId, setMyCancelId] = useState(null);
 
+  // --- owner booking on behalf of a client from her client list ---
+  const [bookingForClient, setBookingForClient] = useState(null); // {name, phone} | null
+
+  function startBookingForClient(client) {
+    setBookingForClient(client);
+    setClientName(client.name);
+    setClientPhone(client.phone);
+    setSelectedSlot(null);
+    setSuccessMsg("");
+    setMode("client");
+  }
+
+  function stopBookingForClient() {
+    setBookingForClient(null);
+    setClientName("");
+    setClientPhone("");
+    setSelectedSlot(null);
+    setSuccessMsg("");
+    setMode("owner");
+  }
+
   // --- owner mode password gate ---
   const [ownerUnlocked, setOwnerUnlocked] = useState(false);
   const [showOwnerLogin, setShowOwnerLogin] = useState(false);
@@ -320,6 +371,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
 
   function requestOwnerMode() {
     if (ownerUnlocked) {
+      setBookingForClient(null);
       setMode("owner");
     } else {
       setOwnerPassInput("");
@@ -331,8 +383,13 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
   // --- admin oversight: entering via the admin panel (?adminEnter=1) skips
   // this business's own owner password, but only if the browser tab already
   // holds a valid admin session (set after the admin password was verified).
+  const [showOwnerToggle, setShowOwnerToggle] = useState(false);
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
+    if (params.get("owner") === "1" || params.get("adminEnter") === "1") {
+      setShowOwnerToggle(true);
+    }
     if (params.get("adminEnter") === "1" && sessionStorage.getItem(ADMIN_SESSION_KEY) === "1") {
       setOwnerUnlocked(true);
       setMode("owner");
@@ -348,6 +405,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
       if (biz && hash === biz.passwordHash) {
         setOwnerUnlocked(true);
         setShowOwnerLogin(false);
+        setBookingForClient(null);
         setMode("owner");
       } else {
         setOwnerPassError("סיסמה שגויה");
@@ -482,13 +540,17 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
         await window.storage.set(scopedKey(bizId, `clientAppts:${newAppt.clientPhone}`), JSON.stringify(updatedList));
       } catch {}
       addToClientBusinessIndex(newAppt.clientPhone, bizId, settings.businessName || DEFAULT_SETTINGS.businessName).catch(() => {});
+      try {
+        await window.storage.set(scopedKey(bizId, `client:${newAppt.clientPhone}`), JSON.stringify({ name: newAppt.clientName, phone: newAppt.clientPhone }));
+      } catch {}
+      upsertBizClientRegistry(bizId, newAppt.clientPhone, newAppt.clientName).catch(() => {});
       if (loggedInClient?.phone === newAppt.clientPhone) {
         setMyUpcoming(updatedList.filter((a) => isUpcoming(a)));
       }
     }
     setSuccessMsg(`נקבע לך תור ל${selectedService.name} בשעה ${minToTime(selectedSlot)}`);
     setSelectedSlot(null);
-    if (!loggedInClient) {
+    if (!loggedInClient && !bookingForClient) {
       setClientName("");
       setClientPhone("");
     }
@@ -551,6 +613,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
       await window.storage.set(scopedKey(bizId, `client:${phone}`), JSON.stringify(profile));
     } catch {}
     addToClientBusinessIndex(phone.trim(), bizId, settings.businessName || DEFAULT_SETTINGS.businessName).catch(() => {});
+    upsertBizClientRegistry(bizId, phone.trim(), name.trim()).catch(() => {});
     setLoggedInClient(profile);
     setClientName(profile.name);
     setClientPhone(profile.phone);
@@ -632,14 +695,16 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
             </p>
           </div>
         </div>
-        <div style={{ background: COLORS.roseSoft }} className="flex rounded-full p-1 text-xs font-medium">
-          <button onClick={() => setMode("client")}
-            style={{ background: mode === "client" ? COLORS.rose : "transparent", color: mode === "client" ? "white" : COLORS.ink }}
-            className="px-3 py-1.5 rounded-full transition-colors">לקוחה</button>
-          <button onClick={requestOwnerMode}
-            style={{ background: mode === "owner" ? COLORS.rose : "transparent", color: mode === "owner" ? "white" : COLORS.ink }}
-            className="px-3 py-1.5 rounded-full transition-colors">בעלת העסק</button>
-        </div>
+        {showOwnerToggle && (
+          <div style={{ background: COLORS.roseSoft }} className="flex rounded-full p-1 text-xs font-medium">
+            <button onClick={() => { setBookingForClient(null); setMode("client"); }}
+              style={{ background: mode === "client" ? COLORS.rose : "transparent", color: mode === "client" ? "white" : COLORS.ink }}
+              className="px-3 py-1.5 rounded-full transition-colors">לקוחה</button>
+            <button onClick={requestOwnerMode}
+              style={{ background: mode === "owner" ? COLORS.rose : "transparent", color: mode === "owner" ? "white" : COLORS.ink }}
+              className="px-3 py-1.5 rounded-full transition-colors">בעלת העסק</button>
+          </div>
+        )}
       </div>
 
       <div className="px-5 py-4 space-y-5 max-w-2xl mx-auto">
@@ -703,19 +768,31 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
 
         {mode === "client" ? (
           <div className="space-y-4">
-            <ClientAuth
-              bizId={bizId}
-              loggedInClient={loggedInClient}
-              loginOrRegisterClient={loginOrRegisterClient}
-              logoutClient={logoutClient}
-              myUpcoming={myUpcoming}
-              myUpcomingLoading={myUpcomingLoading}
-              myCancelId={myCancelId}
-              setMyCancelId={setMyCancelId}
-              myCancelAppointment={myCancelAppointment}
-              cancelLimitHours={settings.cancelLimitHours ?? 48}
-              ownerPhone={settings.ownerPhone}
-            />
+            {bookingForClient && (
+              <div style={{ borderColor: COLORS.sage, background: COLORS.sageSoft }} className="border rounded-xl p-3 flex items-center justify-between gap-2">
+                <p className="text-xs">
+                  קובעת תור עבור <span className="font-medium">{bookingForClient.name}</span> · {bookingForClient.phone}
+                </p>
+                <button onClick={stopBookingForClient} style={{ color: COLORS.rose }} className="text-xs font-medium shrink-0 whitespace-nowrap">
+                  חזרה לניהול לקוחות
+                </button>
+              </div>
+            )}
+            {!bookingForClient && (
+              <ClientAuth
+                bizId={bizId}
+                loggedInClient={loggedInClient}
+                loginOrRegisterClient={loginOrRegisterClient}
+                logoutClient={logoutClient}
+                myUpcoming={myUpcoming}
+                myUpcomingLoading={myUpcomingLoading}
+                myCancelId={myCancelId}
+                setMyCancelId={setMyCancelId}
+                myCancelAppointment={myCancelAppointment}
+                cancelLimitHours={settings.cancelLimitHours ?? 48}
+                ownerPhone={settings.ownerPhone}
+              />
+            )}
             <ClientBooking
               morningSlots={morningSlots} afternoonSlots={afternoonSlots}
               selectedSlot={selectedSlot} setSelectedSlot={setSelectedSlot}
@@ -738,6 +815,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
             updateService={updateService} removeService={removeService} addService={addService}
             addClosure={addClosure} removeClosure={removeClosure}
             saveMsg={saveMsg}
+            onBookForClient={startBookingForClient}
           />
         )}
       </div>
@@ -783,23 +861,15 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
 
 function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient, myUpcoming, myUpcomingLoading, myCancelId, setMyCancelId, myCancelAppointment, cancelLimitHours, ownerPhone }) {
   const [phone, setPhone] = useState("");
-  const [name, setName] = useState("");
-  const [needsName, setNeedsName] = useState(false);
+  const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState("");
   const [checking, setChecking] = useState(false);
 
   async function handleContinue() {
     setError("");
+    setNotFound(false);
     if (!isValidPhone(phone)) {
       setError("מספר טלפון חייב להכיל 10 ספרות");
-      return;
-    }
-    if (needsName) {
-      if (!name.trim()) {
-        setError("נא להזין שם מלא");
-        return;
-      }
-      await loginOrRegisterClient(phone, name);
       return;
     }
     setChecking(true);
@@ -808,8 +878,9 @@ function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient
       const profile = JSON.parse(res.value);
       await loginOrRegisterClient(profile.phone, profile.name);
     } catch {
-      // no existing profile — ask for name to register
-      setNeedsName(true);
+      // no existing profile — new clients are registered by the business
+      // owner (or get picked up automatically the first time they book)
+      setNotFound(true);
     }
     setChecking(false);
   }
@@ -880,18 +951,19 @@ function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient
         אופציונלי — כך לא תצטרכי להזין שוב שם וטלפון, ותוכלי לראות ולנהל תורים קיימים.
       </p>
       <div className="flex gap-2">
-        <input onFocus={(e) => e.target.select()} value={phone} onChange={(e) => { setPhone(e.target.value.replace(/\D/g, "").slice(0, 10)); setNeedsName(false); setError(""); }}
+        <input onFocus={(e) => e.target.select()} value={phone} onChange={(e) => { setPhone(e.target.value.replace(/\D/g, "").slice(0, 10)); setNotFound(false); setError(""); }}
           placeholder="מספר נייד (10 ספרות)" type="tel" inputMode="numeric"
           style={{ borderColor: COLORS.line, fontFamily: "'JetBrains Mono', monospace" }} className="flex-1 border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
       </div>
-      {needsName && (
-        <input onFocus={(e) => e.target.select()} value={name} onChange={(e) => setName(e.target.value)} placeholder="שם מלא (משתמשת חדשה)"
-          style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
+      {notFound && (
+        <p style={{ color: COLORS.muted }} className="text-xs">
+          לא מצאנו אותך במערכת. אפשר לקבוע תור כאורחת בטופס שלמטה, או לבקש מבעלת העסק לרשום אותך.
+        </p>
       )}
       {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
       <button onClick={handleContinue} disabled={checking}
         style={{ background: COLORS.rose }} className="text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-60">
-        {checking ? "בודקת..." : needsName ? "הרשמה והמשך" : "כניסה"}
+        {checking ? "בודקת..." : "כניסה"}
       </button>
     </div>
   );
@@ -985,15 +1057,21 @@ function SlotGroup({ label, slots, selectedSlot, onSelect }) {
   );
 }
 
-function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConfirmCancelId, cancelAppointment, showSettings, setShowSettings, settings, saveSettings, updateService, removeService, addService, addClosure, removeClosure, saveMsg }) {
+function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConfirmCancelId, cancelAppointment, showSettings, setShowSettings, settings, saveSettings, updateService, removeService, addService, addClosure, removeClosure, saveMsg, onBookForClient }) {
+  const [showClients, setShowClients] = useState(false);
   const sorted = [...appointments].sort((a, b) => a.start - b.start);
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p style={{ color: COLORS.muted }} className="text-xs font-medium">{sorted.length} תורים ביום זה</p>
-        <button onClick={() => setShowSettings((v) => !v)} style={{ color: COLORS.rose }} className="text-xs font-medium">
-          ⚙ הגדרות
-        </button>
+        <div className="flex items-center gap-3">
+          <button onClick={() => setShowClients((v) => !v)} style={{ color: COLORS.rose }} className="text-xs font-medium">
+            👥 לקוחות
+          </button>
+          <button onClick={() => setShowSettings((v) => !v)} style={{ color: COLORS.rose }} className="text-xs font-medium">
+            ⚙ הגדרות
+          </button>
+        </div>
       </div>
 
       {!apptsLoading && sorted.length === 0 && (
@@ -1021,6 +1099,13 @@ function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConf
           </div>
         ))}
       </div>
+
+      {showClients && (
+        <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4">
+          <p style={{ color: COLORS.muted }} className="text-xs font-medium mb-2">ניהול לקוחות</p>
+          <ClientsManager bizId={bizId} businessName={settings.businessName} onBookForClient={onBookForClient} />
+        </div>
+      )}
 
       {showSettings && (
         <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4 space-y-4">
@@ -1127,6 +1212,131 @@ function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConf
             <ChangePassword bizId={bizId} />
           </div>
           {saveMsg && <p style={{ color: COLORS.sage }} className="text-xs">{saveMsg}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClientsManager({ bizId, businessName, onBookForClient }) {
+  const [clients, setClients] = useState(null); // null = loading
+  const [newName, setNewName] = useState("");
+  const [newPhone, setNewPhone] = useState("");
+  const [addError, setAddError] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [editingPhone, setEditingPhone] = useState(null);
+  const [editName, setEditName] = useState("");
+  const [confirmDeletePhone, setConfirmDeletePhone] = useState(null);
+
+  async function load() {
+    const list = await getBizClientRegistry(bizId);
+    setClients([...list].sort((a, b) => (a.name || "").localeCompare(b.name || "", "he")));
+  }
+
+  useEffect(() => { load(); }, [bizId]);
+
+  async function handleAdd() {
+    setAddError("");
+    if (!newName.trim()) return setAddError("נא להזין שם");
+    if (!isValidPhone(newPhone)) return setAddError("מספר טלפון חייב להכיל 10 ספרות");
+    setAdding(true);
+    try {
+      const phone = newPhone.trim();
+      await window.storage.set(scopedKey(bizId, `client:${phone}`), JSON.stringify({ name: newName.trim(), phone }));
+      addToClientBusinessIndex(phone, bizId, businessName || DEFAULT_SETTINGS.businessName).catch(() => {});
+      await upsertBizClientRegistry(bizId, phone, newName.trim());
+      setNewName("");
+      setNewPhone("");
+      await load();
+    } catch {
+      setAddError("קרתה תקלה, נסי שוב");
+    }
+    setAdding(false);
+  }
+
+  async function handleSaveEdit(phone) {
+    if (!editName.trim()) return;
+    try {
+      await window.storage.set(scopedKey(bizId, `client:${phone}`), JSON.stringify({ name: editName.trim(), phone }));
+      await upsertBizClientRegistry(bizId, phone, editName.trim());
+    } catch {}
+    setEditingPhone(null);
+    await load();
+  }
+
+  // Removes the client from the owner's list and login lookup. Her past /
+  // existing appointment records are left untouched — same "orphan rather
+  // than cascade-delete" approach used elsewhere in the app.
+  async function handleDelete(phone) {
+    try {
+      await window.storage.delete(scopedKey(bizId, `client:${phone}`));
+    } catch {}
+    await removeFromBizClientRegistry(bizId, phone);
+    setConfirmDeletePhone(null);
+    await load();
+  }
+
+  return (
+    <div className="space-y-3">
+      <div style={{ borderColor: COLORS.line }} className="border rounded-xl p-3 space-y-2">
+        <p style={{ color: COLORS.muted }} className="text-xs font-medium">הוספת לקוחה</p>
+        <div className="grid grid-cols-2 gap-2">
+          <input onFocus={(e) => e.target.select()} value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="שם מלא"
+            style={{ borderColor: COLORS.line }} className="border rounded-lg px-2 py-1.5 text-sm" />
+          <input onFocus={(e) => e.target.select()} value={newPhone} onChange={(e) => setNewPhone(e.target.value.replace(/\D/g, "").slice(0, 10))} placeholder="טלפון" type="tel" inputMode="numeric"
+            style={{ borderColor: COLORS.line, fontFamily: "'JetBrains Mono', monospace" }} className="border rounded-lg px-2 py-1.5 text-sm" />
+        </div>
+        {addError && <p style={{ color: COLORS.rose }} className="text-xs">{addError}</p>}
+        <button onClick={handleAdd} disabled={adding} style={{ background: COLORS.rose }} className="text-white text-xs px-3 py-1.5 rounded-lg font-medium disabled:opacity-60">
+          {adding ? "מוסיפה..." : "+ הוספת לקוחה"}
+        </button>
+      </div>
+
+      {clients === null ? (
+        <p style={{ color: COLORS.muted }} className="text-xs">טוענת...</p>
+      ) : clients.length === 0 ? (
+        <p style={{ color: COLORS.muted }} className="text-xs">אין עדיין לקוחות רשומות.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {clients.map((c) => (
+            <div key={c.phone} style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-lg p-2.5 space-y-1.5">
+              {editingPhone === c.phone ? (
+                <div className="flex items-center gap-1.5">
+                  <input onFocus={(e) => e.target.select()} value={editName} onChange={(e) => setEditName(e.target.value)} autoFocus
+                    onKeyDown={(e) => { if (e.key === "Enter") handleSaveEdit(c.phone); }}
+                    style={{ borderColor: COLORS.line }} className="flex-1 border rounded-lg px-2 py-1 text-sm min-w-0" />
+                  <button onClick={() => handleSaveEdit(c.phone)} style={{ color: COLORS.sage }} className="text-xs font-medium shrink-0">שמירה</button>
+                  <button onClick={() => setEditingPhone(null)} style={{ color: COLORS.muted }} className="text-xs shrink-0">ביטול</button>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium truncate">{c.name}</p>
+                    <p style={{ color: COLORS.muted, fontFamily: "'JetBrains Mono', monospace" }} className="text-xs" dir="ltr">{c.phone}</p>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button onClick={() => onBookForClient(c)} style={{ background: COLORS.sage }} className="text-white text-xs px-2 py-1.5 rounded-lg whitespace-nowrap">
+                      📅 קביעת תור
+                    </button>
+                    <button onClick={() => { setEditingPhone(c.phone); setEditName(c.name); }} style={{ color: COLORS.muted }} className="text-xs px-1">✎</button>
+                  </div>
+                </div>
+              )}
+              {editingPhone !== c.phone && (
+                confirmDeletePhone === c.phone ? (
+                  <div style={{ borderColor: COLORS.line }} className="border-t pt-1.5 flex items-center justify-between gap-2">
+                    <p style={{ color: COLORS.rose }} className="text-xs">להסיר את הלקוחה מהרשימה?</p>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button onClick={() => handleDelete(c.phone)} style={{ background: COLORS.rose }} className="text-white text-xs px-2.5 py-1 rounded-lg">הסרה</button>
+                      <button onClick={() => setConfirmDeletePhone(null)} style={{ borderColor: COLORS.line }} className="border text-xs px-2.5 py-1 rounded-lg">ביטול</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button onClick={() => setConfirmDeletePhone(c.phone)} style={{ color: COLORS.muted }} className="text-[11px]">🗑 הסרת לקוחה</button>
+                )
+              )}
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -1339,7 +1549,7 @@ function BusinessRegister() {
             className="border flex-1 py-2 rounded-lg text-sm font-medium">
             העתקת קישור
           </button>
-          <button onClick={() => goTo(created.link)} style={{ background: COLORS.rose }} className="flex-1 text-white py-2 rounded-lg text-sm font-medium">
+          <button onClick={() => goTo(`${created.link}&owner=1`)} style={{ background: COLORS.rose }} className="flex-1 text-white py-2 rounded-lg text-sm font-medium">
             כניסה לעסק שלי
           </button>
         </div>
@@ -1412,7 +1622,7 @@ function BusinessLogin() {
       const biz = await getBusinessRecord(selected.id);
       const hash = await sha256Hex(password);
       if (biz && hash === biz.passwordHash) {
-        goTo(`${window.location.origin}${window.location.pathname}?biz=${selected.id}`);
+        goTo(`${window.location.origin}${window.location.pathname}?biz=${selected.id}&owner=1`);
         return;
       }
       setError("סיסמה שגויה");
@@ -1432,7 +1642,7 @@ function BusinessLogin() {
       const biz = await getBusinessRecord(selected.id);
       const passwordHash = await sha256Hex(newPassword);
       await window.storage.set(`business:${selected.id}`, JSON.stringify({ ...(biz || {}), id: selected.id, passwordHash }));
-      goTo(`${window.location.origin}${window.location.pathname}?biz=${selected.id}`);
+      goTo(`${window.location.origin}${window.location.pathname}?biz=${selected.id}&owner=1`);
       return;
     } catch {
       setError("קרתה תקלה, נסי שוב");
@@ -1797,12 +2007,12 @@ function Landing() {
             לוח תורים חכם
           </h1>
           <p style={{ color: COLORS.muted }} className="text-sm mt-1">
-            קביעת תורים חכמה לכל בעלת עסק
+            קביעת תורים חכמה לכל בעל/ת עסק
           </p>
         </div>
         <div className="space-y-3">
           <a href="?clientLogin=1" style={{ background: COLORS.rose }} className="block text-white py-3 rounded-xl text-sm font-medium">
-            👤 אני לקוחה — כניסה לעסק שלי
+            👤 כניסה לקביעת תור
           </a>
         </div>
         <div style={{ borderColor: COLORS.line }} className="border-t pt-4 space-y-2">
