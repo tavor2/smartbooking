@@ -112,7 +112,7 @@ const DEFAULT_SETTINGS = {
 
 const STEP = 15;
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "2.9.1";
+const APP_VERSION = "3.1.0";
 
 // --- Service worker: offline caching + enables PWA installability.
 // The install prompt itself is only offered on the shared Landing page
@@ -183,6 +183,26 @@ function minToTime(m) {
   const h = Math.floor(m / 60);
   const mm = m % 60;
   return `${String(h).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+
+// --- "Add to Google Calendar" link — uses Google's public event-template
+// URL (no OAuth, no API key, no backend needed). Opens Google Calendar with
+// the event fields pre-filled; the person still has to tap "save" there.
+function toGCalDateTime(dateStr, minutes) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const hh = String(Math.floor(minutes / 60)).padStart(2, "0");
+  const mm = String(minutes % 60).padStart(2, "0");
+  return `${y}${String(m).padStart(2, "0")}${String(d).padStart(2, "0")}T${hh}${mm}00`;
+}
+function googleCalendarUrl({ date, start, end, serviceName, businessName }) {
+  const dates = `${toGCalDateTime(date, start)}/${toGCalDateTime(date, end)}`;
+  const params = new URLSearchParams({
+    action: "TEMPLATE",
+    text: `${serviceName} · ${businessName}`,
+    dates,
+    details: `תור אצל ${businessName}`,
+  });
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
 }
 function getAllowedSlots(existing, duration, startMin, endMin, maxGap) {
   const res = [];
@@ -384,7 +404,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
   const [clientName, setClientName] = useState("");
   const [clientPhone, setClientPhone] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
-  const [showSettings, setShowSettings] = useState(false);
+  const [lastBookedAppt, setLastBookedAppt] = useState(null);
   const [confirmCancelId, setConfirmCancelId] = useState(null);
   const [saveMsg, setSaveMsg] = useState("");
 
@@ -685,6 +705,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
       }
     }
     setSuccessMsg(`נקבע לך תור ל${selectedService.name} בשעה ${minToTime(selectedSlot)}`);
+    setLastBookedAppt({ date: selectedDate, start: newAppt.start, end: newAppt.end, serviceName: newAppt.serviceName });
     setSelectedSlot(null);
     if (!loggedInClient && !bookingForClient) {
       setClientName("");
@@ -969,6 +990,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
                 cancelLimitHours={settings.cancelLimitHours ?? 48}
                 ownerPhone={settings.ownerPhone}
                 initialPhone={clientAuthPrefillPhone}
+                businessName={settings.businessName || DEFAULT_SETTINGS.businessName}
               />
             )}
             <ClientBooking
@@ -980,6 +1002,8 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
               maxGap={settings.maxGap}
               loggedInClient={loggedInClient}
               fullDayClosure={fullDayClosure}
+              lastBookedAppt={lastBookedAppt}
+              businessName={settings.businessName || DEFAULT_SETTINGS.businessName}
             />
           </div>
         ) : (
@@ -988,12 +1012,12 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
             appointments={appointments} apptsLoading={apptsLoading}
             confirmCancelId={confirmCancelId} setConfirmCancelId={setConfirmCancelId}
             cancelAppointment={cancelAppointment}
-            showSettings={showSettings} setShowSettings={setShowSettings}
             settings={settings} saveSettings={saveSettings}
             updateService={updateService} removeService={removeService} addService={addService}
             addClosure={addClosure} removeClosure={removeClosure}
             saveMsg={saveMsg}
             onBookForClient={startBookingForClient}
+            selectedDate={selectedDate}
           />
         )}
       </div>
@@ -1032,7 +1056,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
   );
 }
 
-function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient, myUpcoming, myUpcomingLoading, myCancelId, setMyCancelId, myCancelAppointment, cancelLimitHours, ownerPhone, initialPhone }) {
+function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient, myUpcoming, myUpcomingLoading, myCancelId, setMyCancelId, myCancelAppointment, cancelLimitHours, ownerPhone, initialPhone, businessName }) {
   const [phone, setPhone] = useState(initialPhone || "");
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState("");
@@ -1081,6 +1105,10 @@ function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient
                         {a.date} · {minToTime(a.start)}–{minToTime(a.end)}
                       </p>
                       <p className="text-sm">{a.serviceName}</p>
+                      <a href={googleCalendarUrl({ date: a.date, start: a.start, end: a.end, serviceName: a.serviceName, businessName })}
+                        target="_blank" rel="noopener noreferrer" style={{ color: COLORS.sage }} className="text-[11px] inline-block mt-0.5">
+                        📅 הוספה ליומן Google
+                      </a>
                     </div>
                     {!blocked && (
                       myCancelId === a.id ? (
@@ -1142,15 +1170,23 @@ function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient
   );
 }
 
-function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelectedSlot, duration, clientName, setClientName, clientPhone, setClientPhone, confirmBooking, successMsg, setSuccessMsg, maxGap, loggedInClient, fullDayClosure }) {
+function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelectedSlot, duration, clientName, setClientName, clientPhone, setClientPhone, confirmBooking, successMsg, setSuccessMsg, maxGap, loggedInClient, fullDayClosure, lastBookedAppt, businessName }) {
   if (successMsg) {
     return (
       <div style={{ background: COLORS.sageSoft, borderColor: COLORS.sage }} className="border rounded-2xl p-5 text-center">
         <div style={{ color: COLORS.sage }} className="text-xl mb-1">✓</div>
         <p className="font-medium">{successMsg}</p>
-        <button onClick={() => setSuccessMsg("")} style={{ background: COLORS.sage }} className="mt-3 text-white text-sm px-4 py-1.5 rounded-full">
-          קביעת תור נוסף
-        </button>
+        <div className="flex flex-col items-center gap-2 mt-3">
+          {lastBookedAppt && (
+            <a href={googleCalendarUrl({ ...lastBookedAppt, businessName })} target="_blank" rel="noopener noreferrer"
+              style={{ borderColor: COLORS.sage, color: COLORS.sage }} className="border text-sm px-4 py-1.5 rounded-full font-medium">
+              📅 הוספה ליומן Google
+            </a>
+          )}
+          <button onClick={() => setSuccessMsg("")} style={{ background: COLORS.sage }} className="text-white text-sm px-4 py-1.5 rounded-full">
+            קביעת תור נוסף
+          </button>
+        </div>
       </div>
     );
   }
@@ -1230,22 +1266,32 @@ function SlotGroup({ label, slots, selectedSlot, onSelect }) {
   );
 }
 
-function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConfirmCancelId, cancelAppointment, showSettings, setShowSettings, settings, saveSettings, updateService, removeService, addService, addClosure, removeClosure, saveMsg, onBookForClient }) {
-  const [showClients, setShowClients] = useState(false);
-  const [showNotices, setShowNotices] = useState(false);
+function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConfirmCancelId, cancelAppointment, settings, saveSettings, updateService, removeService, addService, addClosure, removeClosure, saveMsg, onBookForClient, selectedDate }) {
+  // Only one of these panels is open at a time (accordion-style) — opening
+  // one closes the others, instead of them stacking on top of each other.
+  const [activePanel, setActivePanel] = useState(null); // null | "clients" | "notices" | "settings"
+  function togglePanel(name) {
+    setActivePanel((cur) => (cur === name ? null : name));
+  }
   const sorted = [...appointments].sort((a, b) => a.start - b.start);
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p style={{ color: COLORS.muted }} className="text-xs font-medium">{sorted.length} תורים ביום זה</p>
         <div className="flex items-center gap-2">
-          <button onClick={() => setShowClients((v) => !v)} style={{ background: COLORS.roseSoft, color: COLORS.rose }} className="text-sm font-medium px-3 py-2 rounded-full">
+          <button onClick={() => togglePanel("clients")}
+            style={{ background: activePanel === "clients" ? COLORS.rose : COLORS.roseSoft, color: activePanel === "clients" ? "white" : COLORS.rose }}
+            className="text-sm font-medium px-3 py-2 rounded-full">
             👥 לקוחות
           </button>
-          <button onClick={() => setShowNotices((v) => !v)} style={{ background: COLORS.roseSoft, color: COLORS.rose }} className="text-sm font-medium px-3 py-2 rounded-full">
+          <button onClick={() => togglePanel("notices")}
+            style={{ background: activePanel === "notices" ? COLORS.rose : COLORS.roseSoft, color: activePanel === "notices" ? "white" : COLORS.rose }}
+            className="text-sm font-medium px-3 py-2 rounded-full">
             🔔 התראות
           </button>
-          <button onClick={() => setShowSettings((v) => !v)} style={{ background: COLORS.roseSoft, color: COLORS.rose }} className="text-sm font-medium px-3 py-2 rounded-full">
+          <button onClick={() => togglePanel("settings")}
+            style={{ background: activePanel === "settings" ? COLORS.rose : COLORS.roseSoft, color: activePanel === "settings" ? "white" : COLORS.rose }}
+            className="text-sm font-medium px-3 py-2 rounded-full">
             ⚙ הגדרות
           </button>
         </div>
@@ -1264,6 +1310,10 @@ function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConf
               <p style={{ fontFamily: "'JetBrains Mono', monospace" }} className="text-sm font-medium">{minToTime(a.start)}–{minToTime(a.end)}</p>
               <p className="text-sm">{a.serviceName}</p>
               <p style={{ color: COLORS.muted }} className="text-xs">{a.clientName} {a.clientPhone && `· ${a.clientPhone}`}</p>
+              <a href={googleCalendarUrl({ date: selectedDate, start: a.start, end: a.end, serviceName: a.serviceName, businessName: settings.businessName || DEFAULT_SETTINGS.businessName })}
+                target="_blank" rel="noopener noreferrer" style={{ color: COLORS.sage }} className="text-[11px] inline-block mt-0.5">
+                📅 הוספה ליומן Google
+              </a>
             </div>
             {confirmCancelId === a.id ? (
               <div className="flex items-center gap-1.5">
@@ -1277,21 +1327,21 @@ function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConf
         ))}
       </div>
 
-      {showClients && (
+      {activePanel === "clients" && (
         <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4">
           <p style={{ color: COLORS.muted }} className="text-xs font-medium mb-2">ניהול לקוחות</p>
           <ClientsManager bizId={bizId} businessName={settings.businessName} onBookForClient={onBookForClient} />
         </div>
       )}
 
-      {showNotices && (
+      {activePanel === "notices" && (
         <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4">
           <p style={{ color: COLORS.muted }} className="text-xs font-medium mb-2">היסטוריית ביטולים</p>
           <NoticesPanel bizId={bizId} />
         </div>
       )}
 
-      {showSettings && (
+      {activePanel === "settings" && (
         <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4 space-y-4">
           <div className="space-y-2">
             <div>
@@ -1404,6 +1454,7 @@ function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConf
 
 function ClientsManager({ bizId, businessName, onBookForClient }) {
   const [clients, setClients] = useState(null); // null = loading
+  const [search, setSearch] = useState("");
   const [newName, setNewName] = useState("");
   const [newPhone, setNewPhone] = useState("");
   const [addError, setAddError] = useState("");
@@ -1418,6 +1469,18 @@ function ClientsManager({ bizId, businessName, onBookForClient }) {
   }
 
   useEffect(() => { load(); }, [bizId]);
+
+  const filteredClients = useMemo(() => {
+    if (!clients) return clients;
+    const q = search.trim();
+    if (!q) return clients;
+    const qDigits = q.replace(/\D/g, "");
+    return clients.filter((c) => {
+      const nameMatch = (c.name || "").includes(q);
+      const phoneMatch = qDigits && (c.phone || "").includes(qDigits);
+      return nameMatch || phoneMatch;
+    });
+  }, [clients, search]);
 
   async function handleAdd() {
     setAddError("");
@@ -1476,13 +1539,26 @@ function ClientsManager({ bizId, businessName, onBookForClient }) {
         </button>
       </div>
 
+      {clients !== null && clients.length > 0 && (
+        <div className="relative">
+          <input onFocus={(e) => e.target.select()} value={search} onChange={(e) => setSearch(e.target.value)}
+            placeholder="חיפוש לפי שם או טלפון"
+            style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-3 py-2 text-sm" />
+          {search && (
+            <button onClick={() => setSearch("")} style={{ color: COLORS.muted }} className="absolute left-2 top-1/2 -translate-y-1/2 text-xs">✕</button>
+          )}
+        </div>
+      )}
+
       {clients === null ? (
         <p style={{ color: COLORS.muted }} className="text-xs">טוענת...</p>
       ) : clients.length === 0 ? (
         <p style={{ color: COLORS.muted }} className="text-xs">אין עדיין לקוחות רשומות.</p>
+      ) : filteredClients.length === 0 ? (
+        <p style={{ color: COLORS.muted }} className="text-xs">לא נמצאו לקוחות התואמות לחיפוש.</p>
       ) : (
         <div className="space-y-1.5">
-          {clients.map((c) => (
+          {filteredClients.map((c) => (
             <div key={c.phone} style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-lg p-2.5 space-y-1.5">
               {editingPhone === c.phone ? (
                 <div className="flex items-center gap-1.5">
