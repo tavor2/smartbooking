@@ -94,6 +94,7 @@ const DEFAULT_SETTINGS = {
   businessStart: 9,
   businessEnd: 17,
   maxGap: 120,
+  slotStep: 15,
   closures: [],
   leadTimeStartHour: 9,
   cancelLimitHours: 48,
@@ -110,9 +111,8 @@ const DEFAULT_SETTINGS = {
   ],
 };
 
-const STEP = 15;
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "3.2.0";
+const APP_VERSION = "3.3.0";
 
 // --- Service worker: offline caching + enables PWA installability.
 // The install prompt itself is only offered on the shared Landing page
@@ -204,9 +204,9 @@ function googleCalendarUrl({ date, start, end, serviceName, businessName }) {
   });
   return `https://calendar.google.com/calendar/render?${params.toString()}`;
 }
-function getAllowedSlots(existing, duration, startMin, endMin, maxGap) {
+function getAllowedSlots(existing, duration, startMin, endMin, maxGap, step) {
   const res = [];
-  for (let t = startMin; t + duration <= endMin; t += STEP) {
+  for (let t = startMin; t + duration <= endMin; t += step) {
     const overlap = existing.some((a) => t < a.end && t + duration > a.start);
     if (overlap) continue;
     const combined = [...existing, { start: t, end: t + duration }].sort(
@@ -604,6 +604,19 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
 
   const startMin = settings.businessStart * 60;
   const endMin = settings.businessEnd * 60;
+  const slotStep = settings.slotStep || DEFAULT_SETTINGS.slotStep;
+  // Two extra markers along the timeline axis, evenly spaced between the
+  // opening and closing times (not just the two endpoints).
+  const axisMarkers = useMemo(() => {
+    const total = endMin - startMin;
+    const round5 = (m) => Math.round(m / 5) * 5;
+    return [
+      startMin,
+      round5(startMin + total / 3),
+      round5(startMin + (total * 2) / 3),
+      endMin,
+    ];
+  }, [startMin, endMin]);
   const selectedService =
     settings.services.find((s) => s.id === selectedServiceId) || settings.services[0];
   const duration = selectedService?.duration || 30;
@@ -622,7 +635,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
   // round up to the next slot boundary so a slot that's already in progress
   // isn't offered
   const effectiveStartMin = isToday
-    ? Math.max(startMin, Math.ceil(earliestBookableNow / STEP) * STEP)
+    ? Math.max(startMin, Math.ceil(earliestBookableNow / slotStep) * slotStep)
     : startMin;
 
   const dayClosures = useMemo(
@@ -642,19 +655,19 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
   const allowedSlots = useMemo(
     () =>
       selectedService
-        ? getAllowedSlots(existingBlocks, duration, effectiveStartMin, endMin, settings.maxGap)
+        ? getAllowedSlots(existingBlocks, duration, effectiveStartMin, endMin, settings.maxGap, slotStep)
         : [],
-    [existingBlocks, duration, effectiveStartMin, endMin, settings.maxGap, selectedService]
+    [existingBlocks, duration, effectiveStartMin, endMin, settings.maxGap, selectedService, slotStep]
   );
   const allowedSet = useMemo(() => new Set(allowedSlots), [allowedSlots]);
 
   const timelineCells = useMemo(() => {
     const cells = [];
-    for (let t = startMin; t < endMin; t += STEP) {
+    for (let t = startMin; t < endMin; t += slotStep) {
       const closedHere =
         fullDayClosure ||
-        dayClosures.some((c) => !c.allDay && t < timeToMin(c.endTime) && t + STEP > timeToMin(c.startTime));
-      const booked = existingBlocks.some((a) => t < a.end && t + STEP > a.start) && !closedHere;
+        dayClosures.some((c) => !c.allDay && t < timeToMin(c.endTime) && t + slotStep > timeToMin(c.startTime));
+      const booked = existingBlocks.some((a) => t < a.end && t + slotStep > a.start) && !closedHere;
       let status = "blocked";
       if (closedHere) status = "closed";
       else if (booked) status = "booked";
@@ -663,7 +676,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
       cells.push({ t, status });
     }
     return cells;
-  }, [startMin, endMin, existingBlocks, allowedSet, isToday, nowMin, dayClosures, fullDayClosure]);
+  }, [startMin, endMin, existingBlocks, allowedSet, isToday, nowMin, dayClosures, fullDayClosure, slotStep]);
 
   const morningSlots = allowedSlots.filter((t) => t < 12 * 60);
   const afternoonSlots = allowedSlots.filter((t) => t >= 12 * 60);
@@ -955,8 +968,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
             </div>
           )}
           <div className="flex justify-between mt-1 text-[10px]" style={{ color: COLORS.muted, fontFamily: "'JetBrains Mono', monospace" }}>
-            <span>{settings.businessStart}:00</span>
-            <span>{settings.businessEnd}:00</span>
+            {axisMarkers.map((t, i) => <span key={i}>{minToTime(t)}</span>)}
           </div>
         </div>
 
@@ -1392,6 +1404,17 @@ function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConf
                 onChange={(e) => saveSettings({ ...settings, maxGap: Number(e.target.value) })}
                 style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
             </div>
+          </div>
+
+          <div>
+            <label style={{ color: COLORS.muted }} className="text-xs block mb-1">רזולוציית לוח הזמנים (כל כמה דקות)</label>
+            <select value={settings.slotStep || DEFAULT_SETTINGS.slotStep} onChange={(e) => saveSettings({ ...settings, slotStep: Number(e.target.value) })}
+              style={{ borderColor: COLORS.line }} className="w-40 border rounded-lg px-2 py-1.5 text-sm">
+              {[15, 30, 45, 60, 90, 120].map((m) => <option key={m} value={m}>{m} דקות</option>)}
+            </select>
+            <p style={{ color: COLORS.muted }} className="text-[11px] mt-1">
+              קובע גם את גודל המשבצות בציר הזמן וגם באילו הפרשי זמן אפשר להציע תורים.
+            </p>
           </div>
 
           <div>
