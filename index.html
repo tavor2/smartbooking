@@ -99,6 +99,7 @@ const DEFAULT_SETTINGS = {
   leadTimeStartHour: 9,
   cancelLimitHours: 48,
   ownerPhone: "",
+  ownerName: "",
   businessName: "לוח תורים חכם",
   tagline: "קביעת תורים חכמה",
   services: [
@@ -112,7 +113,7 @@ const DEFAULT_SETTINGS = {
 };
 
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "3.5.0";
+const APP_VERSION = "3.5.2";
 
 // --- Service worker: offline caching + enables PWA installability.
 // The install prompt itself is only offered on the shared Landing page
@@ -1078,6 +1079,8 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
               fullDayClosure={fullDayClosure}
               lastBookedAppt={lastBookedAppt}
               businessName={settings.businessName || DEFAULT_SETTINGS.businessName}
+              ownerPhone={settings.ownerPhone}
+              ownerName={settings.ownerName}
             />
           </div>
         ) : (
@@ -1392,7 +1395,7 @@ function ClientChangePassword({ bizId, phone }) {
   );
 }
 
-function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelectedSlot, duration, clientName, setClientName, clientPhone, setClientPhone, confirmBooking, successMsg, setSuccessMsg, maxGap, loggedInClient, fullDayClosure, lastBookedAppt, businessName }) {
+function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelectedSlot, duration, clientName, setClientName, clientPhone, setClientPhone, confirmBooking, successMsg, setSuccessMsg, maxGap, loggedInClient, fullDayClosure, lastBookedAppt, businessName, ownerPhone, ownerName }) {
   if (successMsg) {
     return (
       <div style={{ background: COLORS.sageSoft, borderColor: COLORS.sage }} className="border rounded-2xl p-5 text-center">
@@ -1435,6 +1438,9 @@ function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelected
           {afternoonSlots.length > 0 && <SlotGroup label="צהריים / אחה״צ" slots={afternoonSlots} selectedSlot={selectedSlot} onSelect={setSelectedSlot} />}
         </div>
       )}
+      <p style={{ color: COLORS.ink }} className="text-xs font-bold">
+        במידה ולא נמצא תור מתאים במערכת יש לתאם מול {(ownerName && ownerName.trim()) || businessName} באופן עצמי{ownerPhone ? <> בטלפון <a href={`tel:${ownerPhone}`} className="underline">{ownerPhone}</a></> : ""}.
+      </p>
       {selectedSlot != null && (
         <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4 space-y-3">
           <p className="text-sm font-medium">
@@ -1637,6 +1643,16 @@ function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConf
             </select>
             <p style={{ color: COLORS.muted }} className="text-[11px] mt-1">
               לפני השעה הזו ביום, לקוח/ה יכול/ה לקבוע תור לסמוך יותר. מהשעה הזו ואילך, כל תור חדש לאותו יום חייב להיות לפחות {LEAD_TIME_HOURS} שעות קדימה.
+            </p>
+          </div>
+
+          <div>
+            <label style={{ color: COLORS.muted }} className="text-xs block mb-1">שם פרטי (בעלת העסק)</label>
+            <input onFocus={(e) => e.target.select()} value={settings.ownerName ?? ""} placeholder="לדוגמה: איילת"
+              onChange={(e) => saveSettings({ ...settings, ownerName: e.target.value })}
+              style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+            <p style={{ color: COLORS.muted }} className="text-[11px] mt-1">
+              משמש בהודעה ללקוחות שממליצה לתאם מולך ישירות אם לא נמצא תור מתאים במערכת.
             </p>
           </div>
 
