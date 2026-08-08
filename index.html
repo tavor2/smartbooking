@@ -112,7 +112,7 @@ const DEFAULT_SETTINGS = {
 };
 
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "3.3.0";
+const APP_VERSION = "3.4.0";
 
 // --- Service worker: offline caching + enables PWA installability.
 // The install prompt itself is only offered on the shared Landing page
@@ -321,6 +321,56 @@ async function addToClientBusinessIndex(phone, bizId, businessName) {
     await window.storage.set(`clientBiz:${phone}`, JSON.stringify(updated));
   } catch {}
   return updated;
+}
+
+// --- Client login password (mirrors the owner's password gate). Every
+// client record gets a passwordHash; new/never-set-a-password clients
+// default to "1111" so nothing breaks for existing data or brand-new
+// clients created by a booking / by the owner's client manager.
+const DEFAULT_CLIENT_PASSWORD = "1111";
+let _defaultClientPasswordHashCache = null;
+async function getDefaultClientPasswordHash() {
+  if (!_defaultClientPasswordHashCache) {
+    _defaultClientPasswordHashCache = await sha256Hex(DEFAULT_CLIENT_PASSWORD);
+  }
+  return _defaultClientPasswordHashCache;
+}
+
+async function getClientProfile(bizId, phone) {
+  try {
+    const res = await window.storage.get(scopedKey(bizId, `client:${phone}`));
+    return res?.value ? JSON.parse(res.value) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Creates or updates a client's {name, phone} record while always
+// preserving (or defaulting) passwordHash — every other write path used to
+// overwrite the whole doc with just {name, phone}, silently wiping out
+// whatever password the client had set.
+async function saveClientProfile(bizId, phone, name) {
+  const existing = await getClientProfile(bizId, phone);
+  const passwordHash = existing?.passwordHash || (await getDefaultClientPasswordHash());
+  const profile = { name: name.trim(), phone: phone.trim(), passwordHash };
+  await window.storage.set(scopedKey(bizId, `client:${phone}`), JSON.stringify(profile));
+  return profile;
+}
+
+async function changeClientPassword(bizId, phone, newPassword) {
+  const existing = await getClientProfile(bizId, phone);
+  const passwordHash = await sha256Hex(newPassword);
+  const profile = { ...(existing || {}), name: existing?.name || "", phone, passwordHash };
+  await window.storage.set(scopedKey(bizId, `client:${phone}`), JSON.stringify(profile));
+  return profile;
+}
+
+async function resetClientPasswordToDefault(bizId, phone) {
+  const existing = await getClientProfile(bizId, phone);
+  const passwordHash = await getDefaultClientPasswordHash();
+  const profile = { ...(existing || {}), name: existing?.name || "", phone, passwordHash };
+  await window.storage.set(scopedKey(bizId, `client:${phone}`), JSON.stringify(profile));
+  return profile;
 }
 
 // --- Per-business client registry: powers the owner's client list (add /
@@ -572,33 +622,26 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
     registerServiceWorker();
   }, []);
 
-  // Auto-login a returning client from this device's saved session, so she
-  // doesn't have to retype her phone number every visit.
+  // Auto-recognize a returning client from this device's saved session, so
+  // she doesn't have to retype her phone number (or password) every visit.
   useEffect(() => {
     const saved = getSavedClientSession(bizId);
+    // If the link explicitly names a phone (?clientPhone=...) that's
+    // DIFFERENT from whatever this device has cached, the link wins — a
+    // shared/reused device must not keep "recognizing" the previous
+    // client when a different client's link is opened. This only pre-fills
+    // the phone field; ClientAuth still requires her password before
+    // logging in (a phone number alone, from a link, isn't authentication).
+    const phoneFromLink = new URLSearchParams(window.location.search).get("clientPhone");
+    if (phoneFromLink && isValidPhone(phoneFromLink) && phoneFromLink !== saved?.phone) {
+      setClientAuthPrefillPhone(phoneFromLink);
+      return;
+    }
     if (saved?.phone && saved?.name) {
       setLoggedInClient(saved);
       setClientName(saved.name);
       setClientPhone(saved.phone);
       refreshMyUpcoming(saved.phone);
-      return;
-    }
-    // No saved session on this device yet — if she arrived via the shared
-    // landing page's phone finder (?clientPhone=...), she already typed
-    // her number once there. Recognize her by it immediately instead of
-    // asking her to type it again on this page.
-    const phoneFromLink = new URLSearchParams(window.location.search).get("clientPhone");
-    if (phoneFromLink && isValidPhone(phoneFromLink)) {
-      window.storage.get(scopedKey(bizId, `client:${phoneFromLink}`))
-        .then((res) => {
-          const profile = JSON.parse(res.value);
-          return loginOrRegisterClient(profile.phone, profile.name);
-        })
-        .catch(() => {
-          // Not (yet) a registered client of this specific business —
-          // pre-fill the phone field so she still doesn't retype it.
-          setClientAuthPrefillPhone(phoneFromLink);
-        });
     }
   }, [bizId]);
 
@@ -705,7 +748,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
       } catch {}
       addToClientBusinessIndex(newAppt.clientPhone, bizId, settings.businessName || DEFAULT_SETTINGS.businessName).catch(() => {});
       try {
-        await window.storage.set(scopedKey(bizId, `client:${newAppt.clientPhone}`), JSON.stringify({ name: newAppt.clientName, phone: newAppt.clientPhone }));
+        await saveClientProfile(bizId, newAppt.clientPhone, newAppt.clientName);
       } catch {}
       upsertBizClientRegistry(bizId, newAppt.clientPhone, newAppt.clientName).catch(() => {});
       if (loggedInClient?.phone === newAppt.clientPhone) {
@@ -790,14 +833,20 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
   }
 
   async function loginOrRegisterClient(phone, name) {
-    const profile = { name: name.trim(), phone: phone.trim() };
+    // Preserves (or defaults) her passwordHash instead of blindly
+    // overwriting the doc with just {name, phone}.
+    let profile;
     try {
-      await window.storage.set(scopedKey(bizId, `client:${phone}`), JSON.stringify(profile));
-    } catch {}
+      profile = await saveClientProfile(bizId, phone, name);
+    } catch {
+      profile = { name: name.trim(), phone: phone.trim() };
+    }
     addToClientBusinessIndex(phone.trim(), bizId, settings.businessName || DEFAULT_SETTINGS.businessName).catch(() => {});
     upsertBizClientRegistry(bizId, phone.trim(), name.trim()).catch(() => {});
-    saveClientSession(bizId, profile);
-    setLoggedInClient(profile);
+    // Only the name/phone are cached on-device — never the password hash.
+    const sessionProfile = { name: profile.name, phone: profile.phone };
+    saveClientSession(bizId, sessionProfile);
+    setLoggedInClient(sessionProfile);
     setClientName(profile.name);
     setClientPhone(profile.phone);
     await refreshMyUpcoming(phone);
@@ -1087,24 +1136,75 @@ function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient
   const [error, setError] = useState("");
   const [checking, setChecking] = useState(false);
 
-  async function handleContinue() {
+  // --- password gate (mirrors the owner's) — set once a phone number
+  // matches a registered client, cleared again on logout / "מספר אחר".
+  const [pendingProfile, setPendingProfile] = useState(null); // {name, phone, passwordHash} | null
+  const [passwordInput, setPasswordInput] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [checkingPassword, setCheckingPassword] = useState(false);
+  const autoCheckedRef = useRef(null); // avoids re-triggering the auto-check for the same initialPhone
+
+  async function checkPhone(phoneValue) {
     setError("");
     setNotFound(false);
-    if (!isValidPhone(phone)) {
+    if (!isValidPhone(phoneValue)) {
       setError("מספר טלפון חייב להכיל 10 ספרות");
       return;
     }
     setChecking(true);
-    try {
-      const res = await window.storage.get(scopedKey(bizId, `client:${phone}`));
-      const profile = JSON.parse(res.value);
-      await loginOrRegisterClient(profile.phone, profile.name);
-    } catch {
+    const profile = await getClientProfile(bizId, phoneValue);
+    setChecking(false);
+    if (profile) {
+      setPendingProfile(profile);
+      setPasswordInput("");
+      setPasswordError("");
+    } else {
       // no existing profile — new clients are registered by the business
       // owner (or get picked up automatically the first time they book)
       setNotFound(true);
     }
-    setChecking(false);
+  }
+
+  function handleContinue() {
+    checkPhone(phone);
+  }
+
+  // A phone arriving via a link (?clientPhone=...) still needs her
+  // password — this just saves her retyping the number, then runs the
+  // same lookup a manual submit would.
+  useEffect(() => {
+    if (initialPhone && isValidPhone(initialPhone) && autoCheckedRef.current !== initialPhone) {
+      autoCheckedRef.current = initialPhone;
+      setPhone(initialPhone);
+      checkPhone(initialPhone);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialPhone]);
+
+  function backToPhoneEntry() {
+    setPendingProfile(null);
+    setPasswordInput("");
+    setPasswordError("");
+  }
+
+  async function handlePasswordSubmit() {
+    if (!pendingProfile) return;
+    setPasswordError("");
+    setCheckingPassword(true);
+    try {
+      const hash = await sha256Hex(passwordInput);
+      const expectedHash = pendingProfile.passwordHash || (await getDefaultClientPasswordHash());
+      if (hash === expectedHash) {
+        await loginOrRegisterClient(pendingProfile.phone, pendingProfile.name);
+        setPendingProfile(null);
+        setPasswordInput("");
+      } else {
+        setPasswordError("סיסמה שגויה");
+      }
+    } catch {
+      setPasswordError("שגיאה באימות, נסי שוב");
+    }
+    setCheckingPassword(false);
   }
 
   if (loggedInClient) {
@@ -1166,6 +1266,32 @@ function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient
         ) : (
           <p style={{ color: COLORS.muted }} className="text-xs">אין לך תורים עתידיים רשומים.</p>
         )}
+        <div style={{ borderColor: COLORS.line }} className="border-t pt-2">
+          <ClientChangePassword bizId={bizId} phone={loggedInClient.phone} />
+        </div>
+      </div>
+    );
+  }
+
+  if (pendingProfile) {
+    return (
+      <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4 space-y-2">
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-medium">שלום, {pendingProfile.name}</p>
+          <button onClick={backToPhoneEntry} style={{ color: COLORS.muted }} className="text-xs">מספר אחר</button>
+        </div>
+        <input onFocus={(e) => e.target.select()} value={passwordInput}
+          onChange={(e) => { setPasswordInput(e.target.value); setPasswordError(""); }}
+          onKeyDown={(e) => { if (e.key === "Enter") handlePasswordSubmit(); }}
+          type="password" autoFocus placeholder="סיסמה"
+          style={{ borderColor: COLORS.line, fontFamily: "'JetBrains Mono', monospace" }}
+          className="w-full border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 text-center tracking-widest" />
+        <p style={{ color: COLORS.muted }} className="text-[11px]">סיסמת ברירת המחדל היא 1111, אלא אם שינית אותה.</p>
+        {passwordError && <p style={{ color: COLORS.rose }} className="text-xs">{passwordError}</p>}
+        <button onClick={handlePasswordSubmit} disabled={checkingPassword}
+          style={{ background: COLORS.rose }} className="text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-60">
+          {checkingPassword ? "בודקת..." : "כניסה"}
+        </button>
       </div>
     );
   }
@@ -1179,6 +1305,7 @@ function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient
       <div className="flex gap-2">
         <input onFocus={(e) => e.target.select()} value={phone} onChange={(e) => { setPhone(e.target.value.replace(/\D/g, "").slice(0, 10)); setNotFound(false); setError(""); }}
           placeholder="מספר נייד (10 ספרות)" type="tel" inputMode="numeric"
+          onKeyDown={(e) => { if (e.key === "Enter") handleContinue(); }}
           style={{ borderColor: COLORS.line, fontFamily: "'JetBrains Mono', monospace" }} className="flex-1 border rounded-lg px-3 py-2 text-sm outline-none focus:ring-2" />
       </div>
       {notFound && (
@@ -1191,6 +1318,76 @@ function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient
         style={{ background: COLORS.rose }} className="text-white text-sm px-4 py-2 rounded-lg font-medium disabled:opacity-60">
         {checking ? "בודקת..." : "כניסה"}
       </button>
+    </div>
+  );
+}
+
+// --- Client-side "change my password" — same shape as the owner's
+// ChangePassword, but scoped to a client record instead of a business.
+function ClientChangePassword({ bizId, phone }) {
+  const [open, setOpen] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function handleChange() {
+    setError("");
+    setSuccess("");
+    if (!currentPassword) return setError("נא להזין את הסיסמה הנוכחית");
+    if (newPassword.length < 4) return setError("הסיסמה החדשה חייבת להכיל לפחות 4 תווים");
+    if (newPassword !== confirmPassword) return setError("הסיסמאות החדשות אינן תואמות");
+    setSaving(true);
+    try {
+      const profile = await getClientProfile(bizId, phone);
+      const currentHash = await sha256Hex(currentPassword);
+      const expectedHash = profile?.passwordHash || (await getDefaultClientPasswordHash());
+      if (currentHash !== expectedHash) {
+        setError("הסיסמה הנוכחית שגויה");
+        setSaving(false);
+        return;
+      }
+      await changeClientPassword(bizId, phone, newPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setSuccess("הסיסמה עודכנה בהצלחה");
+      setTimeout(() => setSuccess(""), 2500);
+    } catch {
+      setError("קרתה תקלה, נסי שוב");
+    }
+    setSaving(false);
+  }
+
+  if (!open) {
+    return (
+      <button onClick={() => setOpen(true)} style={{ color: COLORS.muted }} className="text-xs">
+        שינוי סיסמה
+      </button>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <input onFocus={(e) => e.target.select()} value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} placeholder="סיסמה נוכחית" type="password"
+        style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+      <input onFocus={(e) => e.target.select()} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="סיסמה חדשה" type="password"
+        style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+      <input onFocus={(e) => e.target.select()} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="אימות סיסמה חדשה" type="password"
+        onKeyDown={(e) => { if (e.key === "Enter") handleChange(); }}
+        style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
+      {error && <p style={{ color: COLORS.rose }} className="text-xs">{error}</p>}
+      {success && <p style={{ color: COLORS.sage }} className="text-xs">{success}</p>}
+      <div className="flex gap-2">
+        <button onClick={handleChange} disabled={saving} style={{ background: COLORS.rose }} className="text-white text-xs px-3 py-1.5 rounded-lg font-medium disabled:opacity-60">
+          {saving ? "מעדכנת..." : "עדכון סיסמה"}
+        </button>
+        <button onClick={() => { setOpen(false); setError(""); setSuccess(""); }} style={{ borderColor: COLORS.line, color: COLORS.muted }} className="border text-xs px-3 py-1.5 rounded-lg">
+          ביטול
+        </button>
+      </div>
     </div>
   );
 }
@@ -1498,6 +1695,8 @@ function ClientsManager({ bizId, businessName, onBookForClient }) {
   const [editingPhone, setEditingPhone] = useState(null);
   const [editName, setEditName] = useState("");
   const [confirmDeletePhone, setConfirmDeletePhone] = useState(null);
+  const [confirmResetPhone, setConfirmResetPhone] = useState(null);
+  const [resettingPhone, setResettingPhone] = useState(null);
 
   async function load() {
     const list = await getBizClientRegistry(bizId);
@@ -1525,7 +1724,7 @@ function ClientsManager({ bizId, businessName, onBookForClient }) {
     setAdding(true);
     try {
       const phone = newPhone.trim();
-      await window.storage.set(scopedKey(bizId, `client:${phone}`), JSON.stringify({ name: newName.trim(), phone }));
+      await saveClientProfile(bizId, phone, newName.trim());
       addToClientBusinessIndex(phone, bizId, businessName || DEFAULT_SETTINGS.businessName).catch(() => {});
       await upsertBizClientRegistry(bizId, phone, newName.trim());
       setNewName("");
@@ -1540,11 +1739,22 @@ function ClientsManager({ bizId, businessName, onBookForClient }) {
   async function handleSaveEdit(phone) {
     if (!editName.trim()) return;
     try {
-      await window.storage.set(scopedKey(bizId, `client:${phone}`), JSON.stringify({ name: editName.trim(), phone }));
+      await saveClientProfile(bizId, phone, editName.trim());
       await upsertBizClientRegistry(bizId, phone, editName.trim());
     } catch {}
     setEditingPhone(null);
     await load();
+  }
+
+  // Lets the owner get a client back into her account if she forgot a
+  // password she changed herself — resets it back to the app-wide default.
+  async function handleResetPassword(phone) {
+    setResettingPhone(phone);
+    try {
+      await resetClientPasswordToDefault(bizId, phone);
+    } catch {}
+    setResettingPhone(null);
+    setConfirmResetPhone(null);
   }
 
   // Removes the client from the owner's list and login lookup. Her past /
@@ -1627,8 +1837,21 @@ function ClientsManager({ bizId, businessName, onBookForClient }) {
                       <button onClick={() => setConfirmDeletePhone(null)} style={{ borderColor: COLORS.line }} className="border text-xs px-2.5 py-1 rounded-lg">ביטול</button>
                     </div>
                   </div>
+                ) : confirmResetPhone === c.phone ? (
+                  <div style={{ borderColor: COLORS.line }} className="border-t pt-1.5 flex items-center justify-between gap-2">
+                    <p style={{ color: COLORS.rose }} className="text-xs">לאפס את הסיסמה שלה ל-1111?</p>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button onClick={() => handleResetPassword(c.phone)} disabled={resettingPhone === c.phone} style={{ background: COLORS.rose }} className="text-white text-xs px-2.5 py-1 rounded-lg disabled:opacity-60">
+                        {resettingPhone === c.phone ? "מאפסת..." : "איפוס"}
+                      </button>
+                      <button onClick={() => setConfirmResetPhone(null)} style={{ borderColor: COLORS.line }} className="border text-xs px-2.5 py-1 rounded-lg">ביטול</button>
+                    </div>
+                  </div>
                 ) : (
-                  <button onClick={() => setConfirmDeletePhone(c.phone)} style={{ color: COLORS.muted }} className="text-[11px]">🗑 הסרת לקוח/ה</button>
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => setConfirmResetPhone(c.phone)} style={{ color: COLORS.muted }} className="text-[11px]">🔑 איפוס סיסמה</button>
+                    <button onClick={() => setConfirmDeletePhone(c.phone)} style={{ color: COLORS.muted }} className="text-[11px]">🗑 הסרת לקוח/ה</button>
+                  </div>
                 )
               )}
             </div>
