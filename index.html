@@ -112,7 +112,7 @@ const DEFAULT_SETTINGS = {
 
 const STEP = 15;
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "3.1.0";
+const APP_VERSION = "3.1.1";
 
 // --- Service worker: offline caching + enables PWA installability.
 // The install prompt itself is only offered on the shared Landing page
@@ -864,7 +864,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
           </div>
         </div>
       )}
-      <div style={{ borderColor: COLORS.line }} className="border-b px-5 py-4 relative max-w-2xl mx-auto">
+      <div style={{ borderColor: COLORS.line }} className="border-b px-5 py-4 max-w-2xl mx-auto">
         <div className="flex flex-col items-center text-center gap-1">
           <div className="flex items-center gap-2">
             <span style={{ color: COLORS.rose }} className="text-lg leading-none">✦</span>
@@ -875,17 +875,17 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
           <p style={{ color: COLORS.muted }} className="text-xs">
             {settings.tagline || DEFAULT_SETTINGS.tagline}
           </p>
+          {showOwnerToggle && (
+            <div style={{ background: COLORS.roseSoft }} className="flex rounded-full p-1 text-xs font-medium mt-2">
+              <button onClick={() => { setBookingForClient(null); setMode("client"); }}
+                style={{ background: mode === "client" ? COLORS.rose : "transparent", color: mode === "client" ? "white" : COLORS.ink }}
+                className="px-3 py-1.5 rounded-full transition-colors">לקוח/ה</button>
+              <button onClick={requestOwnerMode}
+                style={{ background: mode === "owner" ? COLORS.rose : "transparent", color: mode === "owner" ? "white" : COLORS.ink }}
+                className="px-3 py-1.5 rounded-full transition-colors">בעלת העסק</button>
+            </div>
+          )}
         </div>
-        {showOwnerToggle && (
-          <div style={{ background: COLORS.roseSoft }} className="absolute left-5 top-1/2 -translate-y-1/2 flex rounded-full p-1 text-xs font-medium">
-            <button onClick={() => { setBookingForClient(null); setMode("client"); }}
-              style={{ background: mode === "client" ? COLORS.rose : "transparent", color: mode === "client" ? "white" : COLORS.ink }}
-              className="px-3 py-1.5 rounded-full transition-colors">לקוח/ה</button>
-            <button onClick={requestOwnerMode}
-              style={{ background: mode === "owner" ? COLORS.rose : "transparent", color: mode === "owner" ? "white" : COLORS.ink }}
-              className="px-3 py-1.5 rounded-full transition-colors">בעלת העסק</button>
-          </div>
-        )}
       </div>
 
       <div className="px-5 py-4 space-y-5 max-w-2xl mx-auto">
