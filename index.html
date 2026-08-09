@@ -114,7 +114,7 @@ const DEFAULT_SETTINGS = {
 };
 
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "3.7.3";
+const APP_VERSION = "3.7.4";
 
 // --- Service worker: offline caching + enables PWA installability.
 // The install prompt itself is only offered on the shared Landing page
@@ -371,6 +371,23 @@ const ADMIN_SESSION_KEY = "sb_admin_auth";
 // instead of asking for the password a second time.
 function ownerSessionKey(bizId) {
   return `sb_owner_session:${bizId}`;
+}
+
+// Scans this device's localStorage for any business the owner is already
+// remembered as logged into, so the landing page can offer a one-tap
+// shortcut straight into her business instead of making her search by
+// phone (and now skip the password) every single time.
+function findRememberedOwnerBusinessIds() {
+  const ids = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith("sb_owner_session:") && localStorage.getItem(key) === "1") {
+        ids.push(key.slice("sb_owner_session:".length));
+      }
+    }
+  } catch {}
+  return ids;
 }
 
 function scopedKey(bizId, base) {
@@ -2476,6 +2493,17 @@ function BusinessLogin() {
     if (found.length === 1) setSelected(found[0]);
   }
 
+  // If this device already has a remembered owner session for the matched
+  // business (from a previous successful login here), skip the password
+  // screen entirely instead of asking for it again every time — this is
+  // what was still missing: the earlier fix only covered links that
+  // already carried ?biz=<id>&owner=1, not this phone-search flow.
+  useEffect(() => {
+    if (selected && localStorage.getItem(ownerSessionKey(selected.id)) === "1") {
+      goTo(`${window.location.origin}${window.location.pathname}?biz=${selected.id}&owner=1`);
+    }
+  }, [selected]);
+
   async function handleLogin() {
     setError("");
     if (!selected) return;
@@ -2829,6 +2857,7 @@ function Landing() {
   const [isStandalone, setIsStandalone] = useState(false);
   const [showIOSTip, setShowIOSTip] = useState(false);
   const [installBannerDismissed, setInstallBannerDismissed] = useState(false);
+  const [rememberedBiz, setRememberedBiz] = useState(null); // {id, name} | null
 
   useEffect(() => {
     registerServiceWorker();
@@ -2836,6 +2865,14 @@ function Landing() {
     setIsStandalone(
       window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator.standalone === true
     );
+    // If exactly one business is already remembered as logged-in on this
+    // device, offer a one-tap shortcut instead of the phone-search flow.
+    const ids = findRememberedOwnerBusinessIds();
+    if (ids.length === 1) {
+      getBusinessRecord(ids[0]).then((biz) => {
+        if (biz) setRememberedBiz({ id: ids[0], name: biz.businessName || DEFAULT_SETTINGS.businessName });
+      });
+    }
     const onBeforeInstall = (e) => {
       e.preventDefault();
       setDeferredInstallPrompt(e);
@@ -2879,6 +2916,11 @@ function Landing() {
             👤 כניסה לקביעת תור
           </a>
         </div>
+        {rememberedBiz && (
+          <a href={`?biz=${rememberedBiz.id}&owner=1`} style={{ borderColor: COLORS.sage, color: COLORS.sage }} className="block border-2 py-2.5 rounded-xl text-sm font-medium">
+            🔑 כניסה מהירה ל{rememberedBiz.name}
+          </a>
+        )}
         <div style={{ borderColor: COLORS.line }} className="border-t pt-4 space-y-2">
           <p style={{ color: COLORS.muted }} className="text-xs">לבעלות עסקים</p>
           <div className="flex gap-2">
