@@ -114,7 +114,7 @@ const DEFAULT_SETTINGS = {
 };
 
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "3.6.1";
+const APP_VERSION = "3.7.0";
 
 // --- Service worker: offline caching + enables PWA installability.
 // The install prompt itself is only offered on the shared Landing page
@@ -218,6 +218,115 @@ function googleCalendarUrl({ date, start, end, serviceName, businessName }) {
     details: `תור אצל ${businessName}`,
   });
   return `https://calendar.google.com/calendar/render?${params.toString()}`;
+}
+
+// --- Downloadable .ics calendar file WITH a custom reminder (VALARM).
+// Google's plain template link above can't set a reminder lead time — it
+// always uses the viewer's default calendar reminders — so this is the
+// only way (without OAuth/a backend) to let each client control how long
+// before her appointment the alert pops up. Opening the downloaded file
+// lets her add it via any calendar app (Google Calendar, Apple Calendar,
+// Outlook...) with that exact reminder baked in.
+const DEFAULT_REMINDER_MINUTES = 60;
+const REMINDER_OPTIONS = [
+  { value: 0, label: "בלי תזכורת" },
+  { value: 15, label: "15 דקות לפני" },
+  { value: 30, label: "30 דקות לפני" },
+  { value: 60, label: "שעה לפני" },
+  { value: 120, label: "שעתיים לפני" },
+  { value: 1440, label: "יום לפני" },
+  { value: 2880, label: "יומיים לפני" },
+];
+
+function icsUtcDateTime(dateStr, minutes) {
+  // Builds the JS Date from LOCAL wall-clock numbers (matches how the rest
+  // of the app already treats dates — see toKey's comment on avoiding UTC
+  // shifts), then reads its UTC fields for the ICS "...Z" format, which
+  // every calendar app interprets unambiguously regardless of the
+  // device's own timezone.
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const dt = new Date(y, m - 1, d, 0, 0, 0, 0);
+  dt.setMinutes(dt.getMinutes() + minutes);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${dt.getUTCFullYear()}${pad(dt.getUTCMonth() + 1)}${pad(dt.getUTCDate())}T${pad(dt.getUTCHours())}${pad(dt.getUTCMinutes())}${pad(dt.getUTCSeconds())}Z`;
+}
+
+function minutesToIcsDuration(minutes) {
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const mins = minutes % 60;
+  let dur = "P";
+  if (days) dur += `${days}D`;
+  if (hours || mins) {
+    dur += "T";
+    if (hours) dur += `${hours}H`;
+    if (mins) dur += `${mins}M`;
+  }
+  return dur === "P" ? "PT0M" : dur;
+}
+
+function buildIcsContent({ date, start, end, serviceName, businessName, reminderMinutes }) {
+  const dtStart = icsUtcDateTime(date, start);
+  const dtEnd = icsUtcDateTime(date, end);
+  const lines = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//SmartBooking//HE",
+    "CALSCALE:GREGORIAN",
+    "BEGIN:VEVENT",
+    `UID:${genId()}@smartbooking`,
+    `DTSTAMP:${dtStart}`,
+    `DTSTART:${dtStart}`,
+    `DTEND:${dtEnd}`,
+    `SUMMARY:${serviceName} · ${businessName}`,
+    `DESCRIPTION:תור אצל ${businessName}`,
+  ];
+  if (reminderMinutes > 0) {
+    lines.push(
+      "BEGIN:VALARM",
+      "ACTION:DISPLAY",
+      "DESCRIPTION:תזכורת לתור",
+      `TRIGGER:-${minutesToIcsDuration(reminderMinutes)}`,
+      "END:VALARM"
+    );
+  }
+  lines.push("END:VEVENT", "END:VCALENDAR");
+  return lines.join("\r\n");
+}
+
+function downloadIcsFile(icsContent, filename) {
+  const blob = new Blob([icsContent], { type: "text/calendar;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// Small reusable control: shows the "add to calendar" action using the
+// client's reminder preference, right next to a select to change it (kept
+// tiny/inline since it appears inside compact appointment cards).
+function AddToCalendarWithReminder({ date, start, end, serviceName, businessName, reminderMinutes, onReminderChange }) {
+  function handleAdd() {
+    const ics = buildIcsContent({ date, start, end, serviceName, businessName, reminderMinutes });
+    downloadIcsFile(ics, `${businessName}-${date}.ics`);
+  }
+  return (
+    <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+      <button onClick={handleAdd} style={{ color: COLORS.sage }} className="text-[11px] font-medium">
+        📅 הוספה ליומן
+      </button>
+      {onReminderChange && (
+        <select value={reminderMinutes} onChange={(e) => onReminderChange(Number(e.target.value))}
+          style={{ borderColor: COLORS.line, color: COLORS.muted }} className="border rounded px-1 py-0.5 text-[10px]">
+          {REMINDER_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      )}
+    </div>
+  );
 }
 function getAllowedSlots(existing, duration, startMin, endMin, maxGap, step) {
   const res = [];
@@ -394,7 +503,15 @@ async function getClientProfile(bizId, phone) {
 async function saveClientProfile(bizId, phone, name) {
   const existing = await getClientProfile(bizId, phone);
   const passwordHash = existing?.passwordHash || (await getDefaultClientPasswordHash());
-  const profile = { name: name.trim(), phone: phone.trim(), passwordHash };
+  const reminderMinutes = existing?.reminderMinutes ?? DEFAULT_REMINDER_MINUTES;
+  const profile = { name: name.trim(), phone: phone.trim(), passwordHash, reminderMinutes };
+  await window.storage.set(scopedKey(bizId, `client:${phone}`), JSON.stringify(profile));
+  return profile;
+}
+
+async function updateClientReminderMinutes(bizId, phone, minutes) {
+  const existing = await getClientProfile(bizId, phone);
+  const profile = { ...(existing || {}), phone, reminderMinutes: minutes };
   await window.storage.set(scopedKey(bizId, `client:${phone}`), JSON.stringify(profile));
   return profile;
 }
@@ -888,13 +1005,31 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
     }
     addToClientBusinessIndex(phone.trim(), bizId, settings.businessName || DEFAULT_SETTINGS.businessName).catch(() => {});
     upsertBizClientRegistry(bizId, phone.trim(), name.trim()).catch(() => {});
-    // Only the name/phone are cached on-device — never the password hash.
-    const sessionProfile = { name: profile.name, phone: profile.phone };
+    // Name/phone/reminder preference are cached on-device — never the
+    // password hash — so her reminder setting is available immediately on
+    // every future visit without an extra fetch.
+    const sessionProfile = {
+      name: profile.name,
+      phone: profile.phone,
+      reminderMinutes: profile.reminderMinutes ?? DEFAULT_REMINDER_MINUTES,
+    };
     saveClientSession(bizId, sessionProfile);
     setLoggedInClient(sessionProfile);
     setClientName(profile.name);
     setClientPhone(profile.phone);
     await refreshMyUpcoming(phone);
+  }
+
+  // Updates her reminder-lead-time preference, both on the server (so it's
+  // remembered next time she opens the site elsewhere) and in the local
+  // session cache (so it applies immediately without a refetch).
+  async function updateMyReminderMinutes(minutes) {
+    if (!loggedInClient) return;
+    setLoggedInClient((cur) => (cur ? { ...cur, reminderMinutes: minutes } : cur));
+    saveClientSession(bizId, { ...loggedInClient, reminderMinutes: minutes });
+    try {
+      await updateClientReminderMinutes(bizId, loggedInClient.phone, minutes);
+    } catch {}
   }
 
   function logoutClient() {
@@ -1110,6 +1245,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
                 ownerPhone={settings.ownerPhone}
                 initialPhone={clientAuthPrefillPhone}
                 businessName={settings.businessName || DEFAULT_SETTINGS.businessName}
+                updateMyReminderMinutes={updateMyReminderMinutes}
               />
             )}
             <ClientBooking
@@ -1124,6 +1260,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
               lastBookedAppt={lastBookedAppt}
               businessName={settings.businessName || DEFAULT_SETTINGS.businessName}
               noSlotMessage={getNoSlotMessage(settings)}
+              updateMyReminderMinutes={updateMyReminderMinutes}
             />
           </div>
         ) : (
@@ -1176,7 +1313,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
   );
 }
 
-function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient, myUpcoming, myUpcomingLoading, myCancelId, setMyCancelId, myCancelAppointment, cancelLimitHours, ownerPhone, initialPhone, businessName }) {
+function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient, myUpcoming, myUpcomingLoading, myCancelId, setMyCancelId, myCancelAppointment, cancelLimitHours, ownerPhone, initialPhone, businessName, updateMyReminderMinutes }) {
   const [phone, setPhone] = useState(initialPhone || "");
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState("");
@@ -1276,10 +1413,11 @@ function ClientAuth({ bizId, loggedInClient, loginOrRegisterClient, logoutClient
                         {a.date} · {minToTime(a.start)}–{minToTime(a.end)}
                       </p>
                       <p className="text-sm">{a.serviceName}</p>
-                      <a href={googleCalendarUrl({ date: a.date, start: a.start, end: a.end, serviceName: a.serviceName, businessName })}
-                        target="_blank" rel="noopener noreferrer" style={{ color: COLORS.sage }} className="text-[11px] inline-block mt-0.5">
-                        📅 הוספה ליומן Google
-                      </a>
+                      <AddToCalendarWithReminder
+                        date={a.date} start={a.start} end={a.end} serviceName={a.serviceName} businessName={businessName}
+                        reminderMinutes={loggedInClient.reminderMinutes ?? DEFAULT_REMINDER_MINUTES}
+                        onReminderChange={updateMyReminderMinutes}
+                      />
                     </div>
                     {!blocked && (
                       myCancelId === a.id ? (
@@ -1438,7 +1576,16 @@ function ClientChangePassword({ bizId, phone }) {
   );
 }
 
-function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelectedSlot, duration, clientName, setClientName, clientPhone, setClientPhone, confirmBooking, successMsg, setSuccessMsg, maxGap, loggedInClient, fullDayClosure, lastBookedAppt, businessName, noSlotMessage }) {
+function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelectedSlot, duration, clientName, setClientName, clientPhone, setClientPhone, confirmBooking, successMsg, setSuccessMsg, maxGap, loggedInClient, fullDayClosure, lastBookedAppt, businessName, noSlotMessage, updateMyReminderMinutes }) {
+  // Local override so a guest (not logged in) can still pick a reminder
+  // for this one download; a logged-in client's choice also persists via
+  // updateMyReminderMinutes, and otherwise defaults to her saved preference.
+  const [reminderOverride, setReminderOverride] = useState(null);
+  const reminderMinutes = reminderOverride ?? (loggedInClient?.reminderMinutes ?? DEFAULT_REMINDER_MINUTES);
+  function handleReminderChange(minutes) {
+    setReminderOverride(minutes);
+    if (loggedInClient && updateMyReminderMinutes) updateMyReminderMinutes(minutes);
+  }
   if (successMsg) {
     return (
       <div style={{ background: COLORS.sageSoft, borderColor: COLORS.sage }} className="border rounded-2xl p-5 text-center">
@@ -1446,10 +1593,11 @@ function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelected
         <p className="font-medium">{successMsg}</p>
         <div className="flex flex-col items-center gap-2 mt-3">
           {lastBookedAppt && (
-            <a href={googleCalendarUrl({ ...lastBookedAppt, businessName })} target="_blank" rel="noopener noreferrer"
-              style={{ borderColor: COLORS.sage, color: COLORS.sage }} className="border text-sm px-4 py-1.5 rounded-full font-medium">
-              📅 הוספה ליומן Google
-            </a>
+            <AddToCalendarWithReminder
+              date={lastBookedAppt.date} start={lastBookedAppt.start} end={lastBookedAppt.end}
+              serviceName={lastBookedAppt.serviceName} businessName={businessName}
+              reminderMinutes={reminderMinutes} onReminderChange={handleReminderChange}
+            />
           )}
           <button onClick={() => setSuccessMsg("")} style={{ background: COLORS.sage }} className="text-white text-sm px-4 py-1.5 rounded-full">
             קביעת תור נוסף
