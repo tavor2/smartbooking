@@ -114,7 +114,7 @@ const DEFAULT_SETTINGS = {
 };
 
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "3.7.0";
+const APP_VERSION = "3.7.3";
 
 // --- Service worker: offline caching + enables PWA installability.
 // The install prompt itself is only offered on the shared Landing page
@@ -674,6 +674,16 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
     }
   }
 
+  // Owner login now persists across app restarts (localStorage, not just
+  // sessionStorage) — so a way to explicitly sign out matters, especially
+  // on a shared/borrowed device.
+  function logoutOwner() {
+    try { localStorage.removeItem(ownerSessionKey(bizId)); } catch {}
+    setOwnerUnlocked(false);
+    setBookingForClient(null);
+    setMode("client");
+  }
+
   // --- admin oversight: entering via the admin panel (?adminEnter=1) skips
   // this business's own owner password, but only if the browser tab already
   // holds a valid admin session (set after the admin password was verified).
@@ -689,8 +699,10 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
       setMode("owner");
     }
     // Regular owner login/registration/password-reset already verified the
-    // password one screen ago — no reason to ask for it again here.
-    if (params.get("owner") === "1" && sessionStorage.getItem(ownerSessionKey(bizId)) === "1") {
+    // password one screen ago — no reason to ask for it again here. Uses
+    // localStorage (not sessionStorage) so she stays logged in across app
+    // restarts too, not just within the same browser tab/session.
+    if (params.get("owner") === "1" && localStorage.getItem(ownerSessionKey(bizId)) === "1") {
       setOwnerUnlocked(true);
       setMode("owner");
     }
@@ -733,6 +745,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
       const biz = await getBusinessRecord(bizId);
       const hash = await sha256Hex(ownerPassInput);
       if (biz && hash === biz.passwordHash) {
+        try { localStorage.setItem(ownerSessionKey(bizId), "1"); } catch {}
         setOwnerUnlocked(true);
         setShowOwnerLogin(false);
         setBookingForClient(null);
@@ -1275,6 +1288,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
             saveMsg={saveMsg}
             onBookForClient={startBookingForClient}
             selectedDate={selectedDate}
+            onLogoutOwner={logoutOwner}
           />
         )}
       </div>
@@ -1685,7 +1699,7 @@ function SlotGroup({ label, slots, selectedSlot, onSelect }) {
   );
 }
 
-function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConfirmCancelId, cancelAppointment, settings, saveSettings, updateService, removeService, addService, addClosure, removeClosure, saveMsg, onBookForClient, selectedDate }) {
+function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConfirmCancelId, cancelAppointment, settings, saveSettings, updateService, removeService, addService, addClosure, removeClosure, saveMsg, onBookForClient, selectedDate, onLogoutOwner }) {
   // Only one of these panels is open at a time (accordion-style) — opening
   // one closes the others, instead of them stacking on top of each other.
   // "appts" (today's appointment list) is its own panel now too, so it no
@@ -1911,6 +1925,14 @@ function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConf
           <div>
             <p style={{ color: COLORS.muted }} className="text-xs font-medium mb-2">שינוי סיסמה</p>
             <ChangePassword bizId={bizId} />
+          </div>
+          <div style={{ borderColor: COLORS.line }} className="border-t pt-3">
+            <button onClick={onLogoutOwner} style={{ color: COLORS.muted }} className="text-xs">
+              🚪 יציאה מניהול העסק
+            </button>
+            <p style={{ color: COLORS.muted }} className="text-[11px] mt-1">
+              הכניסה נשמרת במכשיר הזה כדי שלא תצטרכי להזין סיסמה בכל פתיחה — מומלץ ללחוץ כאן במכשיר משותף.
+            </p>
           </div>
           {saveMsg && <p style={{ color: COLORS.sage }} className="text-xs">{saveMsg}</p>}
         </div>
@@ -2232,14 +2254,14 @@ function ChangePassword({ bizId }) {
 }
 
 function ClosuresManager({ closures, addClosure, removeClosure }) {
-  const [date, setDate] = useState("");
+  const todayStr = toKey(new Date());
+  const [date, setDate] = useState(todayStr);
   const [allDay, setAllDay] = useState(true);
   const [startTime, setStartTime] = useState("09:00");
   const [endTime, setEndTime] = useState("17:00");
   const [reason, setReason] = useState("");
   const [error, setError] = useState("");
 
-  const todayStr = toKey(new Date());
   const sorted = [...closures].sort((a, b) => a.date.localeCompare(b.date));
 
   function handleAdd() {
@@ -2259,7 +2281,7 @@ function ClosuresManager({ closures, addClosure, removeClosure }) {
       endTime: allDay ? null : endTime,
       reason: reason.trim(),
     });
-    setDate("");
+    setDate(todayStr);
     setReason("");
     setAllDay(true);
   }
@@ -2267,7 +2289,7 @@ function ClosuresManager({ closures, addClosure, removeClosure }) {
   return (
     <div className="space-y-3">
       <div style={{ borderColor: COLORS.line }} className="border rounded-xl p-3 space-y-2">
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-2 gap-4">
           <input onFocus={(e) => e.target.select()} type="date" min={todayStr} value={date} onChange={(e) => setDate(e.target.value)}
             style={{ borderColor: COLORS.line }} className="border rounded-lg px-2 py-1.5 text-sm" />
           <label className="flex items-center gap-1.5 text-sm">
@@ -2351,7 +2373,13 @@ function BusinessRegister() {
     try {
       const id = genId();
       const passwordHash = await sha256Hex(password);
-      const newSettings = { ...DEFAULT_SETTINGS, businessName: name.trim(), ownerPhone: phone.trim() };
+      // The registration phone is only for her own account recovery/login
+      // (BusinessLogin's phone search) — it must NOT double as the
+      // client-facing "contact me" number in settings.ownerPhone. That was
+      // getting baked straight into the auto-generated no-slot message,
+      // exposing whatever phone she signed up with to every client by
+      // default. She can add a contact number in Settings if she wants one.
+      const newSettings = { ...DEFAULT_SETTINGS, businessName: name.trim() };
       await window.storage.set(`business:${id}`, JSON.stringify({
         id, businessName: name.trim(), ownerPhone: phone.trim(), passwordHash, createdAt: Date.now(),
       }));
@@ -2383,7 +2411,7 @@ function BusinessRegister() {
             className="border flex-1 py-2 rounded-lg text-sm font-medium">
             העתקת קישור
           </button>
-          <button onClick={() => { sessionStorage.setItem(ownerSessionKey(created.id), "1"); goTo(`${created.link}&owner=1`); }} style={{ background: COLORS.rose }} className="flex-1 text-white py-2 rounded-lg text-sm font-medium">
+          <button onClick={() => { localStorage.setItem(ownerSessionKey(created.id), "1"); goTo(`${created.link}&owner=1`); }} style={{ background: COLORS.rose }} className="flex-1 text-white py-2 rounded-lg text-sm font-medium">
             כניסה לעסק שלי
           </button>
         </div>
@@ -2456,7 +2484,7 @@ function BusinessLogin() {
       const biz = await getBusinessRecord(selected.id);
       const hash = await sha256Hex(password);
       if (biz && hash === biz.passwordHash) {
-        sessionStorage.setItem(ownerSessionKey(selected.id), "1");
+        localStorage.setItem(ownerSessionKey(selected.id), "1");
         goTo(`${window.location.origin}${window.location.pathname}?biz=${selected.id}&owner=1`);
         return;
       }
@@ -2477,7 +2505,7 @@ function BusinessLogin() {
       const biz = await getBusinessRecord(selected.id);
       const passwordHash = await sha256Hex(newPassword);
       await window.storage.set(`business:${selected.id}`, JSON.stringify({ ...(biz || {}), id: selected.id, passwordHash }));
-      sessionStorage.setItem(ownerSessionKey(selected.id), "1");
+      localStorage.setItem(ownerSessionKey(selected.id), "1");
       goTo(`${window.location.origin}${window.location.pathname}?biz=${selected.id}&owner=1`);
       return;
     } catch {
