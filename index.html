@@ -100,6 +100,7 @@ const DEFAULT_SETTINGS = {
   cancelLimitHours: 48,
   ownerPhone: "",
   ownerName: "",
+  noSlotMessage: "",
   businessName: "לוח תורים חכם",
   tagline: "קביעת תורים חכמה",
   services: [
@@ -113,7 +114,7 @@ const DEFAULT_SETTINGS = {
 };
 
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "3.5.2";
+const APP_VERSION = "3.6.1";
 
 // --- Service worker: offline caching + enables PWA installability.
 // The install prompt itself is only offered on the shared Landing page
@@ -184,6 +185,19 @@ function minToTime(m) {
   const h = Math.floor(m / 60);
   const mm = m % 60;
   return `${String(h).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+
+// --- Message shown to clients under the time slots when no suitable slot
+// is found. Fully editable per business (settings.noSlotMessage); when left
+// blank, falls back to an auto-composed message using her name/phone — but
+// as soon as she types her own text, it's used exactly as written (no
+// automatic phone number is ever added on top of a custom message).
+function getNoSlotMessage(settings) {
+  const custom = (settings.noSlotMessage || "").trim();
+  if (custom) return custom;
+  const name = (settings.ownerName && settings.ownerName.trim()) || settings.businessName || DEFAULT_SETTINGS.businessName;
+  const phonePart = settings.ownerPhone ? ` בטלפון ${settings.ownerPhone}` : "";
+  return `במידה ולא נמצא תור מתאים במערכת יש לתאם מול ${name} באופן עצמי${phonePart}.`;
 }
 
 // --- "Add to Google Calendar" link — uses Google's public event-template
@@ -300,6 +314,33 @@ async function getBusinessRecord(bizId) {
   } catch {
     return null;
   }
+}
+
+// The business's display name lives in THREE places: the `business:<id>`
+// auth record, the shared registry entry (used by BusinessLogin's phone
+// search and the admin dashboard), and `settings.businessName` (what the
+// app itself displays and what the owner actually edits). Only the last
+// one used to get updated when she renamed her business in the settings
+// panel — so the login screen and admin panel kept showing the original
+// name from registration forever. This keeps all three in sync.
+async function syncBusinessNameEverywhere(bizId, name) {
+  const trimmed = (name || "").trim();
+  if (!trimmed) return;
+  try {
+    const biz = await getBusinessRecord(bizId);
+    if (biz && biz.businessName !== trimmed) {
+      await window.storage.set(`business:${bizId}`, JSON.stringify({ ...biz, businessName: trimmed }));
+    }
+  } catch {}
+  try {
+    const registry = await getBusinessRegistry();
+    const idx = registry.findIndex((b) => b.id === bizId);
+    if (idx >= 0 && registry[idx].name !== trimmed) {
+      const updated = [...registry];
+      updated[idx] = { ...updated[idx], name: trimmed };
+      await window.storage.set(REGISTRY_KEY, JSON.stringify(updated));
+    }
+  } catch {}
 }
 
 // --- Global reverse index: which businesses is this phone a client of?
@@ -594,6 +635,9 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
         const parsed = JSON.parse(val);
         setSettings(parsed);
         setSelectedServiceId((prev) => prev || parsed.services?.[0]?.id || null);
+        // Self-heals any stale business name left over in the registry /
+        // auth record from before this business's name was last changed.
+        syncBusinessNameEverywhere(bizId, parsed.businessName).catch(() => {});
       } else {
         setSettings(DEFAULT_SETTINGS);
         setSelectedServiceId(DEFAULT_SETTINGS.services[0].id);
@@ -1079,8 +1123,7 @@ function SmartBookingApp({ bizId, onOpenRegister, onOpenLogin }) {
               fullDayClosure={fullDayClosure}
               lastBookedAppt={lastBookedAppt}
               businessName={settings.businessName || DEFAULT_SETTINGS.businessName}
-              ownerPhone={settings.ownerPhone}
-              ownerName={settings.ownerName}
+              noSlotMessage={getNoSlotMessage(settings)}
             />
           </div>
         ) : (
@@ -1395,7 +1438,7 @@ function ClientChangePassword({ bizId, phone }) {
   );
 }
 
-function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelectedSlot, duration, clientName, setClientName, clientPhone, setClientPhone, confirmBooking, successMsg, setSuccessMsg, maxGap, loggedInClient, fullDayClosure, lastBookedAppt, businessName, ownerPhone, ownerName }) {
+function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelectedSlot, duration, clientName, setClientName, clientPhone, setClientPhone, confirmBooking, successMsg, setSuccessMsg, maxGap, loggedInClient, fullDayClosure, lastBookedAppt, businessName, noSlotMessage }) {
   if (successMsg) {
     return (
       <div style={{ background: COLORS.sageSoft, borderColor: COLORS.sage }} className="border rounded-2xl p-5 text-center">
@@ -1438,8 +1481,8 @@ function ClientBooking({ morningSlots, afternoonSlots, selectedSlot, setSelected
           {afternoonSlots.length > 0 && <SlotGroup label="צהריים / אחה״צ" slots={afternoonSlots} selectedSlot={selectedSlot} onSelect={setSelectedSlot} />}
         </div>
       )}
-      <p style={{ color: COLORS.ink }} className="text-xs font-bold">
-        במידה ולא נמצא תור מתאים במערכת יש לתאם מול {(ownerName && ownerName.trim()) || businessName} באופן עצמי{ownerPhone ? <> בטלפון <a href={`tel:${ownerPhone}`} className="underline">{ownerPhone}</a></> : ""}.
+      <p style={{ color: COLORS.ink }} className="text-xs font-bold whitespace-pre-line">
+        {noSlotMessage}
       </p>
       {selectedSlot != null && (
         <div style={{ borderColor: COLORS.line, background: "white" }} className="border rounded-2xl p-4 space-y-3">
@@ -1589,6 +1632,7 @@ function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConf
               <label style={{ color: COLORS.muted }} className="text-xs block mb-1">שם העסק (כותרת ראשית)</label>
               <input onFocus={(e) => e.target.select()} value={settings.businessName ?? ""} placeholder="לוח תורים חכם"
                 onChange={(e) => saveSettings({ ...settings, businessName: e.target.value })}
+                onBlur={(e) => syncBusinessNameEverywhere(bizId, e.target.value)}
                 style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
             </div>
             <div>
@@ -1653,6 +1697,19 @@ function OwnerView({ bizId, appointments, apptsLoading, confirmCancelId, setConf
               style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm" />
             <p style={{ color: COLORS.muted }} className="text-[11px] mt-1">
               משמש בהודעה ללקוחות שממליצה לתאם מולך ישירות אם לא נמצא תור מתאים במערכת.
+            </p>
+          </div>
+
+          <div>
+            <label style={{ color: COLORS.muted }} className="text-xs block mb-1">
+              הודעה ללקוחות כשלא נמצא תור מתאים (טקסט חופשי, מודגש)
+            </label>
+            <textarea onFocus={(e) => e.target.select()} value={settings.noSlotMessage ?? ""} rows={3}
+              placeholder={getNoSlotMessage(settings)}
+              onChange={(e) => saveSettings({ ...settings, noSlotMessage: e.target.value })}
+              style={{ borderColor: COLORS.line }} className="w-full border rounded-lg px-2 py-1.5 text-sm resize-y" />
+            <p style={{ color: COLORS.muted }} className="text-[11px] mt-1">
+              אפשר לכתוב כל טקסט שתרצי — למשל בלי מספר טלפון, או עם דרך יצירת קשר אחרת (וואטסאפ, אינסטגרם וכו׳). אם משאירים ריק, תוצג הודעה אוטומטית עם השם והטלפון שהוזנו למעלה.
             </p>
           </div>
 
