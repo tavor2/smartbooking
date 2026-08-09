@@ -114,7 +114,7 @@ const DEFAULT_SETTINGS = {
 };
 
 const LEAD_TIME_HOURS = 2;
-const APP_VERSION = "3.7.4";
+const APP_VERSION = "3.7.5";
 
 // --- Service worker: offline caching + enables PWA installability.
 // The install prompt itself is only offered on the shared Landing page
@@ -171,6 +171,32 @@ function getSavedClientSession(bizId) {
     return null;
   }
 }
+
+// Same idea as findRememberedOwnerBusinessIds, but for a client's saved
+// login — scans this device for any business she's already logged into,
+// so the landing page can offer a one-tap shortcut instead of making her
+// retype her phone number via "כניסה לקביעת תור" every time.
+function findRememberedClientBusinessIds() {
+  const ids = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith("sb_client_session:")) {
+        const raw = localStorage.getItem(key);
+        if (raw) {
+          try {
+            const parsed = JSON.parse(raw);
+            if (parsed?.phone && parsed?.name) {
+              ids.push(key.slice("sb_client_session:".length));
+            }
+          } catch {}
+        }
+      }
+    }
+  } catch {}
+  return ids;
+}
+
 function saveClientSession(bizId, profile) {
   try {
     localStorage.setItem(clientSessionKey(bizId), JSON.stringify(profile));
@@ -2858,6 +2884,7 @@ function Landing() {
   const [showIOSTip, setShowIOSTip] = useState(false);
   const [installBannerDismissed, setInstallBannerDismissed] = useState(false);
   const [rememberedBiz, setRememberedBiz] = useState(null); // {id, name} | null
+  const [rememberedClientBiz, setRememberedClientBiz] = useState(null); // {id, bizName, clientName} | null
 
   useEffect(() => {
     registerServiceWorker();
@@ -2871,6 +2898,18 @@ function Landing() {
     if (ids.length === 1) {
       getBusinessRecord(ids[0]).then((biz) => {
         if (biz) setRememberedBiz({ id: ids[0], name: biz.businessName || DEFAULT_SETTINGS.businessName });
+      });
+    }
+    // Same idea for a returning client — skip re-typing her phone number
+    // via "כניסה לקביעת תור" if this device already recognizes her.
+    const clientIds = findRememberedClientBusinessIds();
+    if (clientIds.length === 1) {
+      const bizId = clientIds[0];
+      const session = getSavedClientSession(bizId);
+      getBusinessRecord(bizId).then((biz) => {
+        if (biz && session) {
+          setRememberedClientBiz({ id: bizId, bizName: biz.businessName || DEFAULT_SETTINGS.businessName, clientName: session.name });
+        }
       });
     }
     const onBeforeInstall = (e) => {
@@ -2912,9 +2951,18 @@ function Landing() {
           </p>
         </div>
         <div className="space-y-3">
-          <a href="?clientLogin=1" style={{ background: COLORS.rose }} className="block text-white py-3 rounded-xl text-sm font-medium">
-            👤 כניסה לקביעת תור
-          </a>
+          {rememberedClientBiz ? (
+            <>
+              <a href={`?biz=${rememberedClientBiz.id}`} style={{ background: COLORS.rose }} className="block text-white py-3 rounded-xl text-sm font-medium">
+                👤 שלום {rememberedClientBiz.clientName} — כניסה מהירה ל{rememberedClientBiz.bizName}
+              </a>
+              <a href="?clientLogin=1" style={{ color: COLORS.muted }} className="block text-xs">קביעת תור אצל עסק אחר</a>
+            </>
+          ) : (
+            <a href="?clientLogin=1" style={{ background: COLORS.rose }} className="block text-white py-3 rounded-xl text-sm font-medium">
+              👤 כניסה לקביעת תור
+            </a>
+          )}
         </div>
         {rememberedBiz && (
           <a href={`?biz=${rememberedBiz.id}&owner=1`} style={{ borderColor: COLORS.sage, color: COLORS.sage }} className="block border-2 py-2.5 rounded-xl text-sm font-medium">
